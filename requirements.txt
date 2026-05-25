@@ -1,9 +1,10 @@
-pyshark>=0.6
+scapy>=2.5
 torch>=2.0
 chromadb>=0.4
 langgraph>=0.2
 langchain-anthropic>=0.3
 langchain-core>=0.3
 anthropic>=0.40
+requests>=2.31
 pytest>=8.0
 python-dotenv>=1.0

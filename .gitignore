@@ -1,4 +1,5 @@
 data/chroma/
+data/threat_intel/*.json
 .env
 __pycache__/
 *.pyc
