@@ -18,12 +18,23 @@ from netsentinel.agent.tools import TOOLS
 from netsentinel.detection.base import FlaggedFlow
 
 
+def _make_llm(**kwargs):
+    """Create a ChatAnthropic instance with the configured provider."""
+    params = {
+        "model": config.LLM_MODEL,
+        "temperature": config.LLM_TEMPERATURE,
+        **kwargs,
+    }
+    if config.LLM_BASE_URL:
+        params["base_url"] = config.LLM_BASE_URL
+    if config.LLM_API_KEY:
+        params["api_key"] = config.LLM_API_KEY
+    return ChatAnthropic(**params)
+
+
 def build_graph():
     """Build and compile the ReAct agent graph."""
-    llm = ChatAnthropic(
-        model=config.LLM_MODEL,
-        temperature=config.LLM_TEMPERATURE,
-    )
+    llm = _make_llm()
     llm_with_tools = llm.bind_tools(TOOLS)
 
     def agent_node(state: AgentState) -> dict:
@@ -44,10 +55,7 @@ def build_graph():
         return END
 
     def force_report_node(state: AgentState) -> dict:
-        llm_plain = ChatAnthropic(
-            model=config.LLM_MODEL,
-            temperature=config.LLM_TEMPERATURE,
-        )
+        llm_plain = _make_llm()
         force_msg = HumanMessage(
             content=(
                 "You have reached the maximum number of investigation steps. "
@@ -119,6 +127,13 @@ def _parse_report(state: dict, flow_key: str) -> ThreatReport:
     """Extract a ThreatReport from the agent's final message."""
     last_msg = state["messages"][-1]
     content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+
+    # Normalize content — some providers return a list of content blocks
+    if isinstance(content, list):
+        content = " ".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
 
     # Try to parse JSON from the response
     try:

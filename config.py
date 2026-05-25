@@ -1,6 +1,11 @@
 """Central configuration for NetSentinel. No magic numbers elsewhere."""
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent
@@ -9,8 +14,10 @@ PCAP_DIR = DATA_DIR / "pcaps"
 THREAT_INTEL_DIR = DATA_DIR / "threat_intel"
 CHROMA_DIR = DATA_DIR / "chroma"
 
-# LLM
-LLM_MODEL = "claude-sonnet-4-20250514"
+# LLM — supports DeepSeek via Anthropic-compatible API
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic")
+LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 LLM_TEMPERATURE = 0.0
 
 # RAG
