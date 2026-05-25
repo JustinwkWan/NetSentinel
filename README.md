@@ -25,7 +25,7 @@ PCAP file
 **4 layers:**
 
 1. **Ingestion** - Reads PCAP files via a source-agnostic `PacketSource` interface, aggregates packets into `FlowRecord` objects with derived features (packet rate, mean packet size).
-2. **Detection** - Flags anomalous flows using a `Detector` protocol. Currently uses `StubDetector` (rule-based); LSTM detector planned for Phase 3.
+2. **Detection** - Flags anomalous flows using a `Detector` protocol. `StubDetector` (rule-based) and `LstmDetector` (LSTM autoencoder trained on normal traffic), selectable via `--detector` flag.
 3. **Agent** - LangGraph ReAct loop that investigates each flagged flow. The agent chooses which tools to call, reacts to results, and decides when to produce its report. Hard iteration cap as a guardrail.
 4. **RAG** - ChromaDB vector store of CVE entries and MITRE ATT&CK techniques, chunked on natural boundaries (one CVE = one chunk, one technique = one chunk).
 
@@ -33,7 +33,7 @@ PCAP file
 
 - **Language:** Python
 - **Packet handling:** scapy
-- **Anomaly detection:** PyTorch (LSTM, Phase 3)
+- **Anomaly detection:** PyTorch (LSTM autoencoder)
 - **Vector store:** ChromaDB
 - **Agent orchestration:** LangGraph (ReAct loop)
 - **LLM:** Anthropic Claude API
@@ -90,19 +90,33 @@ This creates a ChromaDB collection at `data/chroma/` with CVE entries (and ATT&C
 
 ```bash
 python -m netsentinel.cli <path-to-pcap>
+
+# Use the LSTM detector instead of the default stub
+python -m netsentinel.cli <path-to-pcap> --detector lstm
 ```
 
 Example with the included sample:
 
 ```bash
 python -m netsentinel.cli data/pcaps/sample_suspicious.pcap
+python -m netsentinel.cli data/pcaps/sample_suspicious.pcap --detector lstm
 ```
 
 The pipeline will:
 1. Parse the PCAP and assemble network flows
-2. Flag suspicious flows (suspicious ports, high packet rates)
+2. Flag suspicious flows (stub: rule-based, lstm: reconstruction error)
 3. Investigate each flagged flow using the AI agent
 4. Print structured threat reports
+
+### Train the LSTM detector
+
+```bash
+# Generate normal traffic for training
+python scripts/generate_training_pcap.py
+
+# Train the model
+python scripts/train_lstm.py
+```
 
 ### Run the demo
 
@@ -131,7 +145,8 @@ netsentinel/
 │   │   └── flows.py             # FlowRecord dataclass
 │   ├── detection/
 │   │   ├── base.py              # Detector Protocol, FlaggedFlow
-│   │   └── stub.py              # StubDetector (rule-based)
+│   │   ├── stub.py              # StubDetector (rule-based)
+│   │   └── lstm.py              # LstmDetector (LSTM autoencoder)
 │   ├── rag/
 │   │   └── store.py             # ChromaDB query interface
 │   └── agent/
@@ -143,6 +158,8 @@ netsentinel/
 ├── eval/                        # Evaluation harness (Phase 4)
 ├── scripts/
 │   ├── build_rag_store.py       # Build the RAG store
+│   ├── generate_training_pcap.py # Generate normal traffic for LSTM training
+│   ├── train_lstm.py            # Train the LSTM detector
 │   └── run_demo.py              # Run the demo
 └── tests/
 ```
@@ -150,8 +167,8 @@ netsentinel/
 ## Build Phases
 
 - [x] **Phase 1** - Skeleton end-to-end agent (PCAP -> StubDetector -> minimal RAG -> LangGraph loop -> report)
-- [ ] **Phase 2** - Full RAG layer (real CVE/ATT&CK data, natural chunking, second tool)
-- [ ] **Phase 3** - Swap in LSTM detector
+- [x] **Phase 2** - Full RAG layer (real CVE/ATT&CK data, natural chunking, second tool)
+- [x] **Phase 3** - LSTM autoencoder detector (trained on normal traffic, flags anomalous flows by reconstruction error)
 - [ ] **Phase 4** - Evaluation harness with LLM-as-judge
 - [ ] **Phase 5** - Polish/add-backs (dashboard, live capture, deployment)
 

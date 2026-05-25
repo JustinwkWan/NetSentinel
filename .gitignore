@@ -1,5 +1,7 @@
 data/chroma/
 data/threat_intel/*.json
+data/models/
+data/pcaps/normal_traffic.pcap
 .env
 __pycache__/
 *.pyc

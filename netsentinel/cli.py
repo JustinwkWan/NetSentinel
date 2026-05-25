@@ -10,8 +10,12 @@ from netsentinel.agent.graph import investigate_flow
 from netsentinel.detection.stub import StubDetector
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
 
+
 DETECTORS = {
-    "stub": StubDetector,
+    "stub": lambda: StubDetector,
+    "lstm": lambda: __import__(
+        "netsentinel.detection.lstm", fromlist=["LstmDetector"]
+    ).LstmDetector,
 }
 
 
@@ -37,7 +41,8 @@ def main():
         print("[!] No flows found in PCAP. Exiting.")
         sys.exit(0)
 
-    detector = DETECTORS[args.detector]()
+    detector_cls = DETECTORS[args.detector]()
+    detector = detector_cls()
     flagged = detector.flag(flows)
     print(f"[*] Flagged {len(flagged)} suspicious flows")
 
