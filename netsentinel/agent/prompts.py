@@ -15,8 +15,19 @@ match the observed behavior.
 Investigation process:
 1. Analyze the flagged flow details (IPs, ports, protocol, traffic patterns).
 2. Use your tools to look up relevant threat intelligence.
-3. When you have gathered enough information, call the produce_report tool to \
-generate your final threat report.
+3. When you have gathered enough information, produce your final threat report \
+as a JSON object (do NOT call a tool — just respond with the JSON directly).
+
+Your final response MUST be a JSON object with these fields:
+{
+  "severity": "critical|high|medium|low|info",
+  "threat_type": "short label for the threat",
+  "summary": "detailed explanation of the threat",
+  "evidence": ["list", "of", "evidence", "points"],
+  "cve_ids": ["CVE-XXXX-XXXXX"],
+  "attack_techniques": ["TXXXX: Name"],
+  "remediation": "recommended actions"
+}
 
 Guidelines:
 - Make focused, specific queries to the tools.

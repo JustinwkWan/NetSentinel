@@ -16,7 +16,10 @@ class RAGStore:
 
     def query_cve(self, query: str, k: int | None = None) -> list[dict]:
         k = k or config.RETRIEVAL_K
-        collection = self._client.get_collection(config.CHROMA_COLLECTION_CVE)
+        try:
+            collection = self._client.get_collection(config.CHROMA_COLLECTION_CVE)
+        except Exception:
+            return []
         results = collection.query(query_texts=[query], n_results=k)
         return self._format_results(results)
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -16,6 +15,28 @@ from netsentinel.agent.report import ThreatReport
 from netsentinel.agent.state import AgentState
 from netsentinel.agent.tools import TOOLS
 from netsentinel.detection.base import FlaggedFlow
+
+
+def _extract_json(text: str) -> dict | None:
+    """Extract a JSON object from text, handling nested braces properly."""
+    # Find the first '{' and match braces to find the complete object
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    # This brace pair wasn't valid JSON; try finding the next '{'
+                    return _extract_json(text[start + 1 :])
+    return None
 
 
 def _make_llm(**kwargs):
@@ -87,9 +108,20 @@ def build_graph():
     return graph.compile()
 
 
+_compiled_graph = None
+
+
+def _get_graph():
+    """Return a compiled graph, building it once and reusing."""
+    global _compiled_graph
+    if _compiled_graph is None:
+        _compiled_graph = build_graph()
+    return _compiled_graph
+
+
 def investigate_flow(flagged: FlaggedFlow) -> ThreatReport:
     """Run the agent investigation on a single flagged flow."""
-    graph = build_graph()
+    graph = _get_graph()
 
     flow = flagged.flow
     flow_desc = (
@@ -135,23 +167,19 @@ def _parse_report(state: dict, flow_key: str) -> ThreatReport:
             for block in content
         )
 
-    # Try to parse JSON from the response
-    try:
-        match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-            return ThreatReport(
-                flow_key=flow_key,
-                severity=data.get("severity", "medium"),
-                threat_type=data.get("threat_type", "unknown"),
-                summary=data.get("summary", content[:200]),
-                evidence=data.get("evidence", []),
-                cve_ids=data.get("cve_ids", []),
-                attack_techniques=data.get("attack_techniques", []),
-                remediation=data.get("remediation", ""),
-            )
-    except (json.JSONDecodeError, AttributeError):
-        pass
+    # Try to extract JSON from the response — handles nested objects
+    data = _extract_json(content)
+    if data:
+        return ThreatReport(
+            flow_key=flow_key,
+            severity=str(data.get("severity", "medium")),
+            threat_type=str(data.get("threat_type", "unknown")),
+            summary=str(data.get("summary", content[:200])),
+            evidence=data.get("evidence", []),
+            cve_ids=data.get("cve_ids", []),
+            attack_techniques=data.get("attack_techniques", []),
+            remediation=str(data.get("remediation", "")),
+        )
 
     # Fallback: use the raw text as the summary
     return ThreatReport(
