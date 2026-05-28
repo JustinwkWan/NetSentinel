@@ -2,6 +2,8 @@ data/chroma/
 data/threat_intel/*.json
 data/models/
 data/pcaps/normal_traffic.pcap
+data/pcaps/live_*.pcapng
+data/eval/
 .env
 __pycache__/
 *.pyc
@@ -9,3 +11,4 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.claude/
