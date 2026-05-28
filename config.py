@@ -28,6 +28,9 @@ CHROMA_COLLECTION_ATTACK = "attack_techniques"
 # Agent
 AGENT_MAX_ITERATIONS = 5
 
+# Evaluation
+EVAL_JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", LLM_MODEL)
+
 # Detection
 DETECTOR_TYPE = "stub"  # "stub" or "lstm"
 
