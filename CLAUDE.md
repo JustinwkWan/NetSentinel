@@ -1,4 +1,4 @@
-# CLAUDE.md — NetSentinel
+# CLAUDE.md - NetSentinel
 
 ## Project Overview
 
@@ -16,10 +16,10 @@ NetSentinel is an MVP AI agent for network security. It ingests PCAP files, dete
 
 ## Architecture (4 layers)
 
-1. **Ingestion** (`netsentinel/ingestion/`) — `process_packets(source) -> list[FlowRecord]`, source-agnostic via `PacketSource` interface
-2. **Detection** (`netsentinel/detection/`) — `Detector` Protocol with `StubDetector` (rules) and `LstmDetector` (PyTorch); outputs `FlaggedFlow`
-3. **Agent** (`netsentinel/agent/`) — LangGraph ReAct graph with tools `cve_lookup` and `attack_technique_lookup`; produces `ThreatReport`
-4. **RAG** (`netsentinel/rag/`) — ChromaDB collection of CVE + MITRE ATT&CK data, chunked on natural boundaries (one CVE = one chunk, one technique = one chunk)
+1. **Ingestion** (`netsentinel/ingestion/`) - `process_packets(source) -> list[FlowRecord]`, source-agnostic via `PacketSource` interface
+2. **Detection** (`netsentinel/detection/`) - `Detector` Protocol implemented by `LstmDetector`, an LSTM autoencoder over per-packet sequences (first 32 packets of each bidirectional flow); outputs `FlaggedFlow`
+3. **Agent** (`netsentinel/agent/`) - LangGraph ReAct graph with tools `cve_lookup` and `attack_technique_lookup`; produces `ThreatReport`
+4. **RAG** (`netsentinel/rag/`) - ChromaDB collection of CVE + MITRE ATT&CK data, chunked on natural boundaries (one CVE = one chunk, one technique = one chunk)
 
 Evaluation harness lives in `eval/` as a peer package.
 
@@ -35,10 +35,11 @@ Evaluation harness lives in `eval/` as a peer package.
 
 - **Retrieval:** top-k of 3–5, never 20. Chunk on natural boundaries, not fixed-size splits.
 - **Agent loop:** hard iteration cap as guardrail. Terminal action is explicit "produce report" step.
-- **Tools return structured, concise results** — never raw document dumps.
-- **Tools fail gracefully** — return "no relevant results" message, never raise exceptions that kill the graph.
-- **No Reflexion/self-critique in MVP** — no ground-truth signal at runtime to make it useful.
-- **Eval judge uses bias mitigations** — position swap, anti-verbosity instruction, rubric-based scoring, different model family from agent when feasible.
+- **Tools return structured, concise results** - never raw document dumps.
+- **Tools fail gracefully** - return "no relevant results" message, never raise exceptions that kill the graph.
+- **Detector training data:** real traffic saved by live capture's "Save windows for training" toggle into `data/training/` (gitignored). Flows on `TRAINING_EXCLUDE_PORTS` are never learned as normal.
+- **No Reflexion/self-critique in MVP** - no ground-truth signal at runtime to make it useful.
+- **Eval judge uses bias mitigations** - position swap, anti-verbosity instruction, rubric-based scoring, different model family from agent when feasible.
 
 ## Conventions
 
@@ -46,7 +47,7 @@ Evaluation harness lives in `eval/` as a peer package.
 - Data objects (`FlowRecord`, `FlaggedFlow`, `ThreatReport`) are plain Python dataclasses.
 - Interfaces use `typing.Protocol` for duck-typed contracts (e.g., `Detector`, `PacketSource`).
 - Tests live in `tests/` and mirror the package structure.
-- The `data/chroma/` directory is gitignored (built by `scripts/build_rag_store.py`).
+- `data/chroma/` (built by `scripts/build_rag_store.py`) and `data/training/` (filled by live capture) are gitignored.
 
 ## Commands
 
@@ -56,6 +57,9 @@ python -m netsentinel.cli <path-to-pcap>
 
 # Build the RAG store
 python scripts/build_rag_store.py
+
+# Train the LSTM detector on data/training/
+python scripts/train_lstm.py
 
 # Run the demo
 python scripts/run_demo.py

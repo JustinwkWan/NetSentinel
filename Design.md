@@ -160,6 +160,11 @@ Two implementations over the life of the build. `StubDetector` (Phase 1) flags f
 
 Because both detectors satisfy the same `Protocol`, swapping the LSTM in is a one-line change in the entry point and a config flag. The agent layer never changes.
 
+**Update (2026-10-14):** the stub has been removed and `LstmDetector` is the only detector.
+It now models real per-packet sequences: flows are bidirectional, and each flow's first 32 packets become time-ordered steps (log size, log gap, direction, is-TCP, SYN/FIN/RST/PSH flags).
+It trains on the user's own traffic, collected by live capture's "Save windows for training" switch into `data/training/`.
+See `docs/superpowers/specs/2026-10-14-sequence-lstm-design.md`.
+
 ### Layer 3 — Agent Orchestration
 
 A LangGraph graph implementing a ReAct loop. State carried through the graph: the `FlaggedFlow` under investigation, the running message history, the list of tool results gathered so far, and an iteration counter.
@@ -213,8 +218,7 @@ netsentinel/
 │   ├── detection/
 │   │   ├── __init__.py
 │   │   ├── base.py              # Detector Protocol, FlaggedFlow data object
-│   │   ├── stub.py              # StubDetector — rule-based, Phase 1
-│   │   └── lstm.py              # LstmDetector — wraps CAPP model, Phase 3
+│   │   └── lstm.py              # LstmDetector - per-packet sequence LSTM autoencoder
 │   │
 │   ├── rag/
 │   │   ├── __init__.py
@@ -246,7 +250,7 @@ netsentinel/
 └── tests/
     ├── __init__.py
     ├── test_ingestion.py        # FlowRecord assembly, feature extraction
-    ├── test_detection.py        # StubDetector behavior, FlaggedFlow shape
+    ├── test_detection.py        # Sequence encoding, masking, checkpoints, FlaggedFlow shape
     ├── test_rag.py              # chunking boundaries, store query returns
     ├── test_tools.py            # tools return clean structured results, fail gracefully
     └── test_agent.py            # loop terminates, respects iteration cap, produces a report

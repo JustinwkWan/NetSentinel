@@ -27,8 +27,8 @@ PCAP file / live capture
 
 **4 core layers:**
 
-1. **Ingestion** - Reads PCAP/pcapng files via a source-agnostic `PacketSource` interface, aggregates packets into `FlowRecord` objects with derived features (packet rate, mean packet size).
-2. **Detection** - Flags anomalous flows using a `Detector` protocol. `StubDetector` (rule-based) and `LstmDetector` (LSTM autoencoder trained on normal traffic), selectable via `--detector` flag.
+1. **Ingestion** - Reads PCAP/pcapng files via a source-agnostic `PacketSource` interface and groups packets into bidirectional `FlowRecord` objects: both directions of a connection form one flow, which keeps its packets in arrival order.
+2. **Detection** - `LstmDetector`, an LSTM autoencoder over per-packet sequences, flags flows whose packet sequence it cannot reconstruct well. It is trained on your own normal traffic (see [Train the detector](#train-the-detector)).
 3. **Agent** - LangGraph ReAct loop that investigates each flagged flow. The agent chooses which tools to call, reacts to results, and decides when to produce its report. Hard iteration cap as a guardrail.
 4. **RAG** - ChromaDB vector store of CVE entries and MITRE ATT&CK techniques, chunked on natural boundaries (one CVE = one chunk, one technique = one chunk).
 
@@ -55,9 +55,9 @@ Plus two peer layers built on top:
 ### Prerequisites
 
 - Python 3.10+
-- An [Anthropic API key](https://console.anthropic.com/) (or a DeepSeek key — see Configuration)
-- Node.js 18+ and npm — only for the web dashboard
-- Wireshark / `dumpcap` — only for live capture
+- An [Anthropic API key](https://console.anthropic.com/) (or a DeepSeek key - see Configuration)
+- Node.js 18+ and npm - only for the web dashboard
+- Wireshark / `dumpcap` - only for live capture
 
 ### Installation
 
@@ -98,7 +98,7 @@ DEEPSEEK_API_KEY=your-deepseek-key
 ```
 
 All tunable settings (model names, retrieval `k`, agent iteration cap,
-detector thresholds, paths) live in `config.py` — no magic numbers scattered
+detector thresholds, paths) live in `config.py` - no magic numbers scattered
 through the code.
 
 ### Build the RAG Store
@@ -117,33 +117,47 @@ This creates a ChromaDB collection at `data/chroma/` with CVE entries (and ATT&C
 
 ```bash
 python -m netsentinel.cli <path-to-pcap>
-
-# Use the LSTM detector instead of the default stub
-python -m netsentinel.cli <path-to-pcap> --detector lstm
 ```
+
+The detector needs a trained model first; see [Train the detector](#train-the-detector).
 
 Example with the included sample:
 
 ```bash
 python -m netsentinel.cli data/pcaps/sample_suspicious.pcap
-python -m netsentinel.cli data/pcaps/sample_suspicious.pcap --detector lstm
 ```
 
 The pipeline will:
 1. Parse the PCAP and assemble network flows
-2. Flag suspicious flows (stub: rule-based, lstm: reconstruction error)
+2. Flag flows whose packet sequence the LSTM reconstructs poorly
 3. Investigate each flagged flow using the AI agent
 4. Print structured threat reports
 
-### Train the LSTM detector
+### Train the detector
+
+The LSTM learns what normal traffic looks like on your network, so it is trained on traffic you capture yourself.
+
+1. Start the web app (see below) and open the **Live capture** panel.
+2. Turn on **Save windows for training** and start the capture.
+   Each finished 60-second window is kept in `data/training/` (gitignored).
+   Without a trained model the capture only collects data and skips analysis.
+3. Use your machine normally for 1-2 hours.
+   Training needs at least 500 flows, which usually takes about 30 minutes.
+4. Stop the capture and train:
 
 ```bash
-# Generate normal traffic for training
-python scripts/generate_training_pcap.py
-
-# Train the model
-python scripts/train_lstm.py
+python scripts/train_lstm.py              # trains on every pcap in data/training/
+python scripts/train_lstm.py path/to/dir  # or on specific pcaps or folders
 ```
+
+5. Reload the dashboard; runs and live analysis are now enabled.
+
+Retrain the same way whenever your normal traffic changes.
+Flows on known-malicious ports (`TRAINING_EXCLUDE_PORTS` in `config.py`) are never learned as normal.
+
+**What the model sees:** each flow's first 32 packets, in order.
+Each packet is one step with 8 features: log size, log gap since the previous packet, direction (initiator or responder), whether it is TCP, and the SYN, FIN, RST, and PSH flags.
+A flow whose sequence the autoencoder reconstructs worse than the calibrated threshold (mean + 3 standard deviations of training error) is flagged.
 
 ### Run the demo
 
@@ -158,11 +172,11 @@ without parsing terminal output. It has two parts: a FastAPI backend and a
 React/Vite frontend.
 
 ```bash
-# Terminal 1 — backend (http://127.0.0.1:8765)
+# Terminal 1 - backend (http://127.0.0.1:8765)
 source venv/bin/activate
 uvicorn api.main:app --host 127.0.0.1 --port 8765 --reload
 
-# Terminal 2 — frontend (http://localhost:5173)
+# Terminal 2 - frontend (http://localhost:5173)
 cd web
 npm install      # first time only
 npm run dev
@@ -170,10 +184,10 @@ npm run dev
 
 Open http://localhost:5173. From the dashboard you can:
 
-- **Run from `data/pcaps/`** — pick a bundled pcap from the dropdown, or upload one.
-- **Browse a local folder** — point the backend at any folder on your machine and run a pcap in place (no copy).
-- **Live capture** — start/stop a rolling capture; each completed window is auto-analyzed.
-- **View reports** — severity, threat type, summary, CVEs, ATT&CK techniques, and remediation per flagged flow, plus a run history.
+- **Run from `data/pcaps/`** - pick a bundled pcap from the list, or upload one.
+- **Browse a local folder** - point the backend at any folder on your machine and run a pcap in place (no copy).
+- **Live capture** - start/stop a rolling capture; each completed window is auto-analyzed.
+- **View reports** - severity, threat type, summary, CVEs, ATT&CK techniques, and remediation per flagged flow, plus a run history.
 
 The frontend proxies `/api/*` to the backend (see `web/vite.config.ts`).
 
@@ -182,18 +196,19 @@ The frontend proxies `/api/*` to the backend (see `web/vite.config.ts`).
 Capture live traffic into a rolling pcapng ring buffer and analyze each window
 as it completes. Two ways to drive it:
 
-**From the dashboard** — use the "Live capture" panel (Start/Stop, interface,
-detector). The backend manages `dumpcap` and auto-runs the pipeline on each
-closed rotation, cleaning up the capture files on stop.
+**From the dashboard** - use the "Live capture" panel (Start/Stop, interface,
+and the "Save windows for training" switch). The backend manages `dumpcap` and
+auto-runs the pipeline on each closed rotation, cleaning up the capture files
+on stop. With the switch on, each window is also kept in `data/training/`.
 
-**From the CLI** — two standalone scripts:
+**From the CLI** - two standalone scripts:
 
 ```bash
-# Terminal A — capture 60s windows, 10-file rolling buffer (~10 min)
+# Terminal A - capture 60s windows, 10-file rolling buffer (~10 min)
 sudo ./scripts/live_capture.sh
 
-# Terminal B — run the pipeline on each completed window
-DETECTOR=lstm ./scripts/watch_and_run.sh
+# Terminal B - run the pipeline on each completed window
+./scripts/watch_and_run.sh
 ```
 
 > **macOS note:** packet capture needs raw-socket access. Either run with `sudo`,
@@ -250,6 +265,7 @@ NetSentinel/
 ├── config.py                    # Central config (model, k values, thresholds)
 ├── data/
 │   ├── pcaps/                   # Sample + live-capture PCAP files
+│   ├── training/                # Capture windows saved for LSTM training (gitignored)
 │   ├── threat_intel/            # Raw CVE/ATT&CK data
 │   ├── chroma/                  # ChromaDB store (gitignored, built by script)
 │   └── eval/                    # Eval results (gitignored)
@@ -260,8 +276,7 @@ NetSentinel/
 │   │   └── flows.py             # FlowRecord dataclass
 │   ├── detection/
 │   │   ├── base.py              # Detector Protocol, FlaggedFlow
-│   │   ├── stub.py              # StubDetector (rule-based)
-│   │   └── lstm.py              # LstmDetector (LSTM autoencoder)
+│   │   └── lstm.py              # LstmDetector (per-packet sequence LSTM autoencoder)
 │   ├── rag/
 │   │   ├── store.py             # ChromaDB query interface
 │   │   ├── chunking.py          # Natural-boundary chunkers
@@ -288,8 +303,7 @@ NetSentinel/
 │       └── components/          # PcapSelector, RunControls, LiveCapturePanel, …
 ├── scripts/
 │   ├── build_rag_store.py       # Build the RAG store
-│   ├── generate_training_pcap.py # Generate normal traffic for LSTM training
-│   ├── train_lstm.py            # Train the LSTM detector
+│   ├── train_lstm.py            # Train the LSTM detector on data/training/
 │   ├── run_demo.py              # Run the demo
 │   ├── live_capture.sh          # dumpcap rolling-window capture
 │   └── watch_and_run.sh         # Auto-run pipeline on each captured window
@@ -300,7 +314,7 @@ NetSentinel/
 
 - [x] **Phase 1** - Skeleton end-to-end agent (PCAP -> StubDetector -> minimal RAG -> LangGraph loop -> report)
 - [x] **Phase 2** - Full RAG layer (real CVE/ATT&CK data, natural chunking, second tool)
-- [x] **Phase 3** - LSTM autoencoder detector (trained on normal traffic, flags anomalous flows by reconstruction error)
+- [x] **Phase 3** - LSTM autoencoder detector over per-packet sequences, trained on captured normal traffic
 - [x] **Phase 4** - Evaluation harness with LLM-as-judge (rubric scoring + bias mitigations)
 - [x] **Phase 5** - Web dashboard (FastAPI + React), live capture, and local-folder browsing
 
@@ -311,7 +325,8 @@ NetSentinel/
 - **Tools return structured, concise results** - never raw document dumps.
 - **Tools fail gracefully** - return "no relevant results" message, never raise exceptions.
 - **Source-agnostic ingestion** - `PacketSource` protocol allows swapping in live capture without touching downstream code.
-- **Detector protocol** - LSTM swaps in as a one-line config change.
+- **Detector protocol** - the pipeline depends only on `Detector.flag()`, so a different detector can be added without touching callers.
+- **Real sequences, real traffic** - the LSTM reads packets in time order (size, timing, direction, flags), not a fixed list of flow totals, and it trains on the user's own captured traffic rather than synthetic data.
 - **Eval judge bias mitigations** - rubric-based scoring (not holistic preference), explicit anti-verbosity instruction, and a judge model that can differ from the agent model.
 - **Live capture via ring buffer** - `dumpcap` owns rotation and retention (a rolling window of fixed-size windows); the watcher only triggers analysis on closed files. Files are cleaned up on stop.
 - **Local-first web app** - backend binds to localhost and can run pcaps in place from any local folder, no upload/copy required.
