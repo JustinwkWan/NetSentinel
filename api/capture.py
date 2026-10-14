@@ -60,7 +60,6 @@ class CaptureManager:
         self.iface: str | None = None
         self.duration: int = 60
         self.files: int = 10
-        self.detector: str = "lstm"
         self.started_at: float | None = None
         self.runs_triggered: int = 0
         self.last_file: str | None = None
@@ -69,7 +68,7 @@ class CaptureManager:
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def start(self, iface: str, duration: int, files: int, detector: str) -> None:
+    def start(self, iface: str, duration: int, files: int) -> None:
         with self._lock:
             if self.is_running():
                 raise RuntimeError("A capture is already running")
@@ -135,7 +134,6 @@ class CaptureManager:
             self.iface = iface
             self.duration = duration
             self.files = files
-            self.detector = detector
             self.started_at = time.time()
             self.runs_triggered = 0
             self.last_file = None
@@ -204,7 +202,7 @@ class CaptureManager:
     def _cleanup_capture_files(self) -> int:
         """Delete all live_*.pcapng rotation files. Returns the count removed.
 
-        On Unix, unlinking a file an in-flight job already opened is safe —
+        On Unix, unlinking a file an in-flight job already opened is safe -
         the job's file descriptor keeps working until it closes.
         """
         removed = 0
@@ -248,7 +246,6 @@ class CaptureManager:
             job = store.create(
                 pcap_path=str(path),
                 pcap_name=path.name,
-                detector=self.detector,
             )
             start_job_in_background(job)
             self._jobs_by_file[path.name] = job
@@ -263,7 +260,6 @@ class CaptureManager:
                 "iface": self.iface,
                 "duration": self.duration,
                 "files": self.files,
-                "detector": self.detector,
                 "started_at": self.started_at,
                 "runs_triggered": self.runs_triggered,
                 "last_file": self.last_file,

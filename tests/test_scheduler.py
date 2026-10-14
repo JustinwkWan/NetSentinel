@@ -140,9 +140,9 @@ class TestRunPipelineOrdering:
             def flag(self, flows):
                 return flagged
 
-        monkeypatch.setattr("api.jobs._load_detector", lambda name: FlagAll())
+        monkeypatch.setattr("api.jobs._load_detector", lambda: FlagAll())
         job = Job(job_id="j", pcap_path=str(tmp_path / "x.pcap"),
-                  pcap_name="x.pcap", detector="stub")
+                  pcap_name="x.pcap")
 
         run_pipeline(job)
 

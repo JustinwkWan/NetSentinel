@@ -42,9 +42,6 @@ INVESTIGATION_MAX_CONCURRENCY = 4
 # Evaluation
 EVAL_JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", LLM_MODEL)
 
-# Detection
-DETECTOR_TYPE = "stub"  # "stub" or "lstm"
-
 # LSTM detector
 LSTM_MODEL_PATH = DATA_DIR / "models" / "lstm_detector.pt"
 LSTM_MAX_SEQ_LEN = 32  # packets per flow the model sees, from the start of the flow
@@ -53,12 +50,6 @@ LSTM_MIN_TRAINING_FLOWS = 500  # training refuses smaller datasets
 
 # Flows on these ports are never learned as normal traffic
 TRAINING_EXCLUDE_PORTS = {4444, 5555, 6666, 8888, 9999, 1337, 31337, 12345}
-LSTM_ANOMALY_THRESHOLD = 1.82  # fallback for checkpoints without one; training: mean + 3*std of reconstruction errors
-
-# StubDetector thresholds
-STUB_SUSPICIOUS_PORTS = {4444, 5555, 6666, 8888, 9999, 1337, 31337, 12345}
-STUB_HIGH_PACKET_RATE = 1000.0  # packets per second
-STUB_HIGH_BYTE_RATE = 1_000_000  # bytes per second
 
 # API
 API_MAX_JOBS_RETAINED = 200  # finished jobs kept in memory; oldest evicted first

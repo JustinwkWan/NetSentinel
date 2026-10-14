@@ -6,18 +6,9 @@ import argparse
 import sys
 import time
 
-import config
 from netsentinel.agent.scheduler import InvestigationResult, investigate_all
-from netsentinel.detection.stub import StubDetector
+from netsentinel.detection.lstm import LstmDetector, ModelNotTrainedError
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
-
-
-DETECTORS = {
-    "stub": lambda: StubDetector,
-    "lstm": lambda: __import__(
-        "netsentinel.detection.lstm", fromlist=["LstmDetector"]
-    ).LstmDetector,
-}
 
 
 def main():
@@ -25,13 +16,13 @@ def main():
         description="NetSentinel - AI network security agent"
     )
     parser.add_argument("pcap", help="Path to a PCAP file to analyze")
-    parser.add_argument(
-        "--detector",
-        choices=list(DETECTORS.keys()),
-        default=config.DETECTOR_TYPE,
-        help="Detector to use (default: stub)",
-    )
     args = parser.parse_args()
+
+    try:
+        detector = LstmDetector()
+    except ModelNotTrainedError as e:
+        print(f"[!] {e}")
+        sys.exit(1)
 
     print(f"[*] Loading PCAP: {args.pcap}")
     source = PcapFileSource(args.pcap)
@@ -42,8 +33,6 @@ def main():
         print("[!] No flows found in PCAP. Exiting.")
         sys.exit(0)
 
-    detector_cls = DETECTORS[args.detector]()
-    detector = detector_cls()
     flagged = detector.flag(flows)
     print(f"[*] Flagged {len(flagged)} suspicious flows")
 

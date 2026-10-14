@@ -87,14 +87,9 @@ def _result_to_dto(result: InvestigationResult) -> ThreatReportDTO:
     )
 
 
-def _load_detector(name: str):
-    if name == "stub":
-        from netsentinel.detection.stub import StubDetector
-        return StubDetector()
-    if name == "lstm":
-        from netsentinel.detection.lstm import LstmDetector
-        return LstmDetector()
-    raise ValueError(f"Unknown detector: {name}")
+def _load_detector():
+    from netsentinel.detection.lstm import LstmDetector
+    return LstmDetector()
 
 
 @dataclass
@@ -102,7 +97,6 @@ class Job:
     job_id: str
     pcap_path: str
     pcap_name: str
-    detector: str
     status: JobStatus = "pending"
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -127,7 +121,6 @@ class Job:
         return RunSummary(
             job_id=self.job_id,
             pcap_name=self.pcap_name,
-            detector=self.detector,
             status=self.status,
             started_at=self.started_at,
             finished_at=self.finished_at,
@@ -153,13 +146,12 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self, pcap_path: str, pcap_name: str, detector: str) -> Job:
+    def create(self, pcap_path: str, pcap_name: str) -> Job:
         job_id = uuid.uuid4().hex[:12]
         job = Job(
             job_id=job_id,
             pcap_path=pcap_path,
             pcap_name=pcap_name,
-            detector=detector,
         )
         with self._lock:
             self._jobs[job_id] = job
@@ -209,7 +201,7 @@ def run_pipeline(job: Job) -> None:
             return
 
         job.status = "detecting"
-        detector = _load_detector(job.detector)
+        detector = _load_detector()
         flagged = detector.flag(flows)
         job.n_flagged = len(flagged)
         job.flagged = [_flagged_to_dto(f) for f in flagged]

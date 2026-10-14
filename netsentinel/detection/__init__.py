@@ -1,6 +1,5 @@
 from netsentinel.detection.base import Detector, FlaggedFlow
-from netsentinel.detection.stub import StubDetector
 
-__all__ = ["Detector", "FlaggedFlow", "StubDetector"]
+__all__ = ["Detector", "FlaggedFlow"]
 
 # LstmDetector is imported lazily to avoid torch import at startup

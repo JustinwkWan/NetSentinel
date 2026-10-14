@@ -61,6 +61,35 @@ def pcap_dir(tmp_path, monkeypatch):
     return d
 
 
+@pytest.fixture
+def model_ready(monkeypatch):
+    monkeypatch.setattr("netsentinel.detection.lstm.model_status", lambda path=None: None)
+
+
+@pytest.fixture
+def no_model(monkeypatch):
+    from netsentinel.detection.lstm import NO_MODEL_MESSAGE
+    monkeypatch.setattr("netsentinel.detection.lstm.model_status",
+                        lambda path=None: NO_MODEL_MESSAGE)
+    return NO_MODEL_MESSAGE
+
+
+class TestModelReadiness:
+    def test_health_reports_missing_model(self, no_model):
+        body = TestClient(app).get("/health").json()
+        assert body == {"status": "ok", "model_ready": False, "model_message": no_model}
+
+    def test_health_reports_ready_model(self, model_ready):
+        body = TestClient(app).get("/health").json()
+        assert body == {"status": "ok", "model_ready": True, "model_message": None}
+
+    def test_run_without_model_is_refused(self, no_model, pcap_dir):
+        (pcap_dir / "x.pcap").write_bytes(b"")
+        res = TestClient(app).post("/runs", json={"pcap_name": "x.pcap"})
+        assert res.status_code == 409
+        assert res.json()["detail"] == no_model
+
+
 class TestListPcaps:
     def test_file_deleted_mid_listing_is_skipped(self, pcap_dir, monkeypatch):
         (pcap_dir / "kept.pcap").write_bytes(b"x" * 10)
@@ -94,11 +123,11 @@ class TestJobStore:
     def test_oldest_finished_jobs_are_evicted(self, monkeypatch):
         monkeypatch.setattr(config, "API_MAX_JOBS_RETAINED", 2)
         store = JobStore()
-        jobs = [store.create(f"/p{i}", f"p{i}", "stub") for i in range(3)]
+        jobs = [store.create(f"/p{i}", f"p{i}") for i in range(3)]
         for i, job in enumerate(jobs):
             job.started_at = 1000.0 + i
             job.status = "done"
-        running = store.create("/p3", "p3", "stub")
+        running = store.create("/p3", "p3")
         running.started_at = 900.0  # older than all, but still active
 
         ids = {j.job_id for j in store.list()}
@@ -107,7 +136,7 @@ class TestJobStore:
 
     def test_failed_ingest_still_signals_ingested(self, tmp_path):
         job = Job(job_id="j", pcap_path=str(tmp_path / "missing.pcap"),
-                  pcap_name="missing.pcap", detector="stub")
+                  pcap_name="missing.pcap")
         run_pipeline(job)
         assert job.status == "error"
         assert job.ingested.is_set()
@@ -134,7 +163,7 @@ class TestCaptureManager:
 
     def test_capture_progresses_despite_heavy_stderr(self, fake_dumpcap, pcap_dir):
         mgr = CaptureManager()
-        mgr.start(iface="en0", duration=60, files=10, detector="stub")
+        mgr.start(iface="en0", duration=60, files=10)
         try:
             assert _wait_for(lambda: len(self._rotation_files(pcap_dir)) == 2), (
                 "dumpcap stalled before writing its capture files"
@@ -146,7 +175,7 @@ class TestCaptureManager:
         self, fake_dumpcap, pcap_dir
     ):
         mgr = CaptureManager()
-        mgr.start(iface="en0", duration=60, files=10, detector="stub")
+        mgr.start(iface="en0", duration=60, files=10)
         assert _wait_for(lambda: len(self._rotation_files(pcap_dir)) == 2)
         mgr.stop()
 
@@ -168,7 +197,7 @@ class TestCaptureManager:
     def test_startup_failure_reports_dumpcap_error(self, fake_dumpcap):
         mgr = CaptureManager()
         with pytest.raises(RuntimeError, match='no device named "bad"'):
-            mgr.start(iface="bad", duration=60, files=10, detector="stub")
+            mgr.start(iface="bad", duration=60, files=10)
         assert mgr.snapshot()["status"] == "error"
 
     def test_stop_without_session_is_noop(self, fake_dumpcap):

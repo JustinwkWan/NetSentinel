@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# watch_and_run.sh — watch the capture dir for completed rotations and run
+# watch_and_run.sh - watch the capture dir for completed rotations and run
 # the NetSentinel pipeline on each one.
 #
 # A dumpcap ring-buffer file is "closed" once a newer-numbered file exists.
@@ -10,12 +10,10 @@
 #   API_URL              backend base URL (default: http://localhost:8765)
 #   CAPTURE_DIR          dir to watch (default: <repo>/data/pcaps)
 #   CAPTURE_PREFIX       file prefix to match (default: live)
-#   DETECTOR             "stub" or "lstm" (default: lstm)
 #   POLL_INTERVAL        seconds between checks (default: 5)
 #
 # Usage:
 #   ./scripts/watch_and_run.sh
-#   DETECTOR=stub ./scripts/watch_and_run.sh
 
 set -euo pipefail
 
@@ -24,17 +22,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 API_URL="${API_URL:-http://localhost:8765}"
 CAPTURE_DIR="${CAPTURE_DIR:-$REPO_ROOT/data/pcaps}"
 CAPTURE_PREFIX="${CAPTURE_PREFIX:-live}"
-DETECTOR="${DETECTOR:-lstm}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 
 PROCESSED_FILE="$(mktemp -t netsentinel_processed.XXXX)"
 trap 'rm -f "$PROCESSED_FILE"' EXIT
 
 echo "[watch_and_run] watching: $CAPTURE_DIR/${CAPTURE_PREFIX}_*.pcapng"
-echo "[watch_and_run] API: $API_URL  detector: $DETECTOR  poll: ${POLL_INTERVAL}s"
+echo "[watch_and_run] API: $API_URL  poll: ${POLL_INTERVAL}s"
 echo
 
-# Health check (warn but don't fail — the API may come up later)
+# Health check (warn but don't fail - the API may come up later)
 if ! curl -sf "${API_URL}/health" > /dev/null; then
   echo "[watch_and_run] WARN: API not reachable at $API_URL"
 fi
@@ -57,7 +54,7 @@ while true; do
         echo "[watch_and_run] $(date +%H:%M:%S) → trigger run on $name"
         resp=$(curl -sf -X POST "${API_URL}/runs" \
                     -H "Content-Type: application/json" \
-                    -d "{\"pcap_name\":\"${name}\",\"detector\":\"${DETECTOR}\"}" \
+                    -d "{\"pcap_name\":\"${name}\"}" \
                     || true)
         if [[ -n "$resp" ]]; then
           job_id=$(echo "$resp" | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')

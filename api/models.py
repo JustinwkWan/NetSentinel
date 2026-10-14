@@ -66,7 +66,6 @@ class RunRequest(BaseModel):
     # Provide exactly one of pcap_name (within data/pcaps/) or pcap_path (absolute local path).
     pcap_name: str | None = None
     pcap_path: str | None = None
-    detector: Literal["stub", "lstm"] = "stub"
 
 
 class LocalPcap(BaseModel):
@@ -86,7 +85,6 @@ class LocalDirListing(BaseModel):
 class RunSummary(BaseModel):
     job_id: str
     pcap_name: str
-    detector: str
     status: JobStatus
     started_at: float
     finished_at: float | None = None
@@ -108,7 +106,6 @@ class CaptureStartRequest(BaseModel):
     iface: str = "en0"
     duration: int = 60
     files: int = 10
-    detector: Literal["stub", "lstm"] = "lstm"
 
 
 class CaptureStatus(BaseModel):
@@ -117,9 +114,14 @@ class CaptureStatus(BaseModel):
     iface: str | None = None
     duration: int = 60
     files: int = 10
-    detector: str = "lstm"
     started_at: float | None = None
     runs_triggered: int = 0
     last_file: str | None = None
     files_cleaned: int = 0
     dumpcap_available: bool = False
+
+
+class HealthStatus(BaseModel):
+    status: Literal["ok"] = "ok"
+    model_ready: bool
+    model_message: str | None = None

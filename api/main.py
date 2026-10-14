@@ -15,6 +15,7 @@ from api.jobs import start_job_in_background, store
 from api.models import (
     CaptureStartRequest,
     CaptureStatus,
+    HealthStatus,
     LocalDirListing,
     LocalPcap,
     PcapInfo,
@@ -22,6 +23,7 @@ from api.models import (
     RunRequest,
     RunSummary,
 )
+from netsentinel.detection import lstm
 from netsentinel.ingestion.sources import PCAP_SUFFIXES
 
 app =FastAPI(title="NetSentinel API", version="0.1.0")
@@ -41,7 +43,7 @@ def _pcap_dir() -> Path:
 
 
 def _resolve_pcap(name: str) -> Path:
-    # Block path traversal — only allow plain filenames under PCAP_DIR
+    # Block path traversal - only allow plain filenames under PCAP_DIR
     if "/" in name or "\\" in name or name.startswith("."):
         raise HTTPException(400, "Invalid pcap name")
     path = _pcap_dir() / name
@@ -60,9 +62,10 @@ def _resolve_local_path(raw: str) -> Path:
     return path
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+@app.get("/health", response_model=HealthStatus)
+def health() -> HealthStatus:
+    message = lstm.model_status()
+    return HealthStatus(model_ready=message is None, model_message=message)
 
 
 @app.get("/pcaps", response_model=list[PcapInfo])
@@ -104,6 +107,10 @@ def create_run(req: RunRequest) -> RunSummary:
     if bool(req.pcap_name) == bool(req.pcap_path):
         raise HTTPException(400, "Provide exactly one of pcap_name or pcap_path")
 
+    message = lstm.model_status()
+    if message is not None:
+        raise HTTPException(409, message)
+
     if req.pcap_path:
         path = _resolve_local_path(req.pcap_path)
         pcap_name = path.name
@@ -111,11 +118,7 @@ def create_run(req: RunRequest) -> RunSummary:
         path = _resolve_pcap(req.pcap_name)
         pcap_name = req.pcap_name
 
-    job = store.create(
-        pcap_path=str(path),
-        pcap_name=pcap_name,
-        detector=req.detector,
-    )
+    job = store.create(pcap_path=str(path), pcap_name=pcap_name)
     start_job_in_background(job)
     return job.to_summary()
 
@@ -175,7 +178,6 @@ def capture_start(req: CaptureStartRequest) -> CaptureStatus:
             iface=req.iface,
             duration=req.duration,
             files=req.files,
-            detector=req.detector,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e))
