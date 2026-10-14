@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import stat
+import subprocess
 import sys
 import textwrap
 import time
@@ -142,6 +144,26 @@ class TestJobStore:
         assert job.ingested.is_set()
 
 
+@pytest.fixture(autouse=True)
+def no_leaked_processes(monkeypatch):
+    """Terminate any dumpcap a test started, even when the test failed
+    before stopping its capture."""
+    started: list[subprocess.Popen] = []
+    real_popen = capture.subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(capture.subprocess, "Popen", tracking_popen)
+    yield
+    for proc in started:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 @pytest.fixture
 def fake_dumpcap(tmp_path, pcap_dir, monkeypatch):
     script = tmp_path / "fake_dumpcap.py"
@@ -154,6 +176,8 @@ def fake_dumpcap(tmp_path, pcap_dir, monkeypatch):
     monkeypatch.setattr(capture, "find_dumpcap", lambda: str(wrapper))
     monkeypatch.setattr(capture, "start_job_in_background", submitted.append)
     monkeypatch.setattr(config, "CAPTURE_LOG_PATH", tmp_path / "logs" / "dumpcap.log")
+    monkeypatch.setattr(config, "CAPTURE_PID_PATH", tmp_path / "logs" / "dumpcap.pid")
+    monkeypatch.setattr(capture, "_FAKE_DUMPCAP_WRAPPER", str(wrapper), raising=False)
     return submitted
 
 
@@ -323,3 +347,67 @@ class TestTrainingSaveFailure:
         mgr.stop()
 
         assert list(training_dir.iterdir()) == []
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A zombie still answers kill(0); ask ps whether it really runs
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+class TestOrphanedCapture:
+    def test_server_shutdown_stops_the_capture(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready, monkeypatch
+    ):
+        mgr = CaptureManager()
+        monkeypatch.setattr("api.main.manager", mgr)
+        with TestClient(app) as client:
+            res = client.post("/capture/start", json={"iface": "en0"})
+            assert res.status_code == 200
+            pid = mgr._proc.pid
+        # Leaving the client runs the app's shutdown, as a reload or Ctrl-C does
+        assert _wait_for(lambda: not _alive(pid)), "dumpcap outlived the server"
+
+    def test_start_stops_a_capture_orphaned_by_a_crash(
+        self, fake_dumpcap, pcap_dir, model_ready
+    ):
+        # A previous server was killed outright and left its dumpcap running
+        orphan = subprocess.Popen(
+            [capture._FAKE_DUMPCAP_WRAPPER, "-q", "-i", "en0",
+             "-w", str(pcap_dir / "live.pcapng")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        config.CAPTURE_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config.CAPTURE_PID_PATH.write_text(str(orphan.pid))
+        try:
+            mgr = CaptureManager()
+            mgr.start(iface="en0", duration=60, files=10)
+            try:
+                assert orphan.wait(timeout=5) is not None
+                assert config.CAPTURE_PID_PATH.read_text() == str(mgr._proc.pid)
+            finally:
+                mgr.stop()
+            assert not config.CAPTURE_PID_PATH.exists()
+        finally:
+            if orphan.poll() is None:
+                orphan.kill()
+
+    def test_unrelated_process_in_pid_file_is_left_alone(
+        self, fake_dumpcap, pcap_dir, model_ready
+    ):
+        bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        config.CAPTURE_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config.CAPTURE_PID_PATH.write_text(str(bystander.pid))
+        try:
+            mgr = CaptureManager()
+            mgr.start(iface="en0", duration=60, files=10)
+            mgr.stop()
+            assert bystander.poll() is None
+        finally:
+            bystander.kill()
+            bystander.wait()

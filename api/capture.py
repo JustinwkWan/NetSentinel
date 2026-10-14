@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -34,6 +35,7 @@ _DUMPCAP_CANDIDATES = [
 
 CAPTURE_PREFIX = "live"
 _LOG_TAIL_BYTES = 4000
+_ORPHAN_STOP_TIMEOUT_S = 5.0
 
 
 def find_dumpcap() -> str | None:
@@ -105,6 +107,10 @@ class CaptureManager:
 
             config.PCAP_DIR.mkdir(parents=True, exist_ok=True)
 
+            # A server that died without stopping its capture leaves dumpcap
+            # writing into PCAP_DIR with nothing analyzing or cleaning up.
+            _stop_orphaned_capture()
+
             # Clear any stale live_*.pcapng so the watcher starts fresh
             self._cleanup_capture_files()
 
@@ -145,6 +151,8 @@ class CaptureManager:
                 self._proc = None
                 raise RuntimeError(self.error)
 
+            config.CAPTURE_PID_PATH.write_text(str(self._proc.pid))
+
             self.status = "running"
             self.error = None
             self.iface = iface
@@ -179,6 +187,7 @@ class CaptureManager:
                     self._proc.kill()
                     self._proc.wait()
                 self._proc = None
+                config.CAPTURE_PID_PATH.unlink(missing_ok=True)
             self._close_log()
 
             # Let the watcher exit first so only this thread submits jobs.
@@ -317,6 +326,36 @@ class CaptureManager:
                 "training_files_saved": self.training_files_saved,
                 "dumpcap_available": find_dumpcap() is not None,
             }
+
+
+def _process_running(pid: int) -> bool:
+    # A zombie still accepts signals, so ask ps for its state
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _stop_orphaned_capture() -> None:
+    """Stop the dumpcap recorded in CAPTURE_PID_PATH, if it is still ours.
+
+    The pid could have been reused by an unrelated process, so it is only
+    signalled when its command line writes to our capture file.
+    """
+    try:
+        pid = int(config.CAPTURE_PID_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    out = str(config.PCAP_DIR / f"{CAPTURE_PREFIX}.pcapng")
+    command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout
+    if out in command:
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + _ORPHAN_STOP_TIMEOUT_S
+        while _process_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if _process_running(pid):
+            os.kill(pid, signal.SIGKILL)
+    config.CAPTURE_PID_PATH.unlink(missing_ok=True)
 
 
 # Module-level singleton

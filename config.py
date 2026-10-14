@@ -58,4 +58,5 @@ API_MAX_JOBS_RETAINED = 200  # finished jobs kept in memory; oldest evicted firs
 
 # Live capture
 CAPTURE_LOG_PATH = DATA_DIR / "logs" / "dumpcap.log"
+CAPTURE_PID_PATH = DATA_DIR / "logs" / "dumpcap.pid"  # lets a new server stop an orphaned capture
 CAPTURE_INGEST_WAIT_SECONDS = 120.0  # max wait for jobs to read a file before it is deleted

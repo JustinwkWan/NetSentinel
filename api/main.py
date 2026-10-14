@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import stat
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -26,7 +27,16 @@ from api.models import (
 from netsentinel.detection import lstm
 from netsentinel.ingestion.sources import PCAP_SUFFIXES
 
-app = FastAPI(title="NetSentinel API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    # dumpcap runs in its own session, so it would outlive this process
+    # (e.g. on every --reload) with nothing analyzing or cleaning up.
+    manager.stop()
+
+
+app = FastAPI(title="NetSentinel API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
