@@ -61,6 +61,22 @@ def is_excluded(flow: FlowRecord) -> bool:
             or flow.dst_port in config.TRAINING_EXCLUDE_PORTS)
 
 
+def encode_pcap(pcap: Path, max_len: int) -> tuple[list[torch.Tensor], int]:
+    """Encoded sequences of a pcap's trainable flows, and the excluded count.
+
+    Only the encodings leave this function, so a file's full packet lists
+    are freed before the next file is read.
+    """
+    sequences = []
+    excluded = 0
+    for flow in process_packets(PcapFileSource(str(pcap))):
+        if is_excluded(flow):
+            excluded += 1
+        else:
+            sequences.append(encode_flow(flow, max_len))
+    return sequences, excluded
+
+
 def fit(
     model: FlowLSTMAutoencoder,
     train_x: torch.Tensor,
@@ -70,8 +86,12 @@ def fit(
     epochs: int,
     batch_size: int,
     learning_rate: float,
-) -> tuple[dict[str, torch.Tensor], float]:
-    """Train the autoencoder and return (best_state, best_val_loss).
+    patience: int | None = None,
+) -> tuple[dict[str, torch.Tensor], float, int]:
+    """Train the autoencoder and return (best_state, best_val_loss, epochs_run).
+
+    Stops early once validation loss has not improved for `patience` epochs
+    (never, when patience is None).
 
     best_state is a detached copy: state_dict() returns references to the
     live parameters, which later optimizer steps would silently overwrite.
@@ -82,7 +102,10 @@ def fit(
 
     best_val_loss = float("inf")
     best_state = None
+    best_epoch = 0
+    epochs_run = 0
     for epoch in range(epochs):
+        epochs_run = epoch + 1
         model.train()
         train_loss = 0.0
         for batch_x, batch_len in loader:
@@ -100,24 +123,37 @@ def fit(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"    Epoch {epoch + 1:3d}/{epochs}: "
                   f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
 
-    return best_state, best_val_loss
+        if patience is not None and epoch - best_epoch >= patience:
+            print(f"    Stopped at epoch {epoch + 1}: no improvement "
+                  f"for {patience} epochs")
+            break
+
+    return best_state, best_val_loss, epochs_run
 
 
 def train_model(
     paths: list[str | Path] | None = None,
     output_path: str | Path | None = None,
-    epochs: int = 50,
+    epochs: int | None = None,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
     min_flows: int | None = None,
+    patience: int | None = None,
 ) -> dict:
-    """Train on every flow in the given pcaps and save a checkpoint."""
+    """Train on every flow in the given pcaps and save a checkpoint.
+
+    Files that cannot be read (e.g. a window truncated when capture was
+    killed) are skipped and reported rather than aborting training.
+    """
+    epochs = config.LSTM_MAX_EPOCHS if epochs is None else epochs
+    patience = config.LSTM_EARLY_STOP_PATIENCE if patience is None else patience
     paths = paths if paths else [config.TRAINING_DIR]
     output_path = Path(output_path or config.LSTM_MODEL_PATH)
     min_flows = config.LSTM_MIN_TRAINING_FLOWS if min_flows is None else min_flows
@@ -130,23 +166,31 @@ def train_model(
         )
 
     print(f"[*] Reading {len(pcaps)} pcap file(s)...")
-    flows: list[FlowRecord] = []
+    # Encode each file's flows right away: a flow keeps every packet, but the
+    # model only needs the first max_len, so hours of traffic stay small.
+    raw: list[torch.Tensor] = []
+    read_files: list[str] = []
+    skipped_files: list[str] = []
     n_excluded = 0
     for pcap in pcaps:
-        for flow in process_packets(PcapFileSource(str(pcap))):
-            if is_excluded(flow):
-                n_excluded += 1
-            else:
-                flows.append(flow)
-    print(f"[*] {len(flows)} flows kept, {n_excluded} excluded")
+        try:
+            sequences, excluded = encode_pcap(pcap, max_len)
+        except Exception as e:
+            print(f"[!] Skipping {pcap.name}: {e}")
+            skipped_files.append(pcap.name)
+            continue
+        read_files.append(pcap.name)
+        raw.extend(sequences)
+        n_excluded += excluded
+    print(f"[*] {len(raw)} flows kept, {n_excluded} excluded, "
+          f"{len(skipped_files)} unreadable file(s) skipped")
 
-    if len(flows) < min_flows:
+    if len(raw) < min_flows:
         raise TrainingDataError(
-            f"Found {len(flows)} usable flows; training needs at least {min_flows}. "
+            f"Found {len(raw)} usable flows; training needs at least {min_flows}. "
             f"Collect more traffic. {COLLECT_HINT}"
         )
 
-    raw = [encode_flow(f, max_len) for f in flows]
     steps = torch.cat(raw)[:, :NUM_STANDARDIZED]
     feature_means = steps.mean(dim=0).tolist()
     feature_stds = steps.std(dim=0).tolist()
@@ -163,8 +207,10 @@ def train_model(
     model = FlowLSTMAutoencoder(hidden_size=hidden_size)
     print(f"[*] Training ({n_train} train, {len(x) - n_train} val, "
           f"{epochs} epochs, batch {batch_size}, lr {learning_rate})...")
-    best_state, best_val_loss = fit(model, train_x, train_len, val_x, val_len,
-                                    epochs, batch_size, learning_rate)
+    best_state, best_val_loss, epochs_run = fit(
+        model, train_x, train_len, val_x, val_len,
+        epochs, batch_size, learning_rate, patience,
+    )
 
     # Threshold: mean + 3 standard deviations of training-set errors
     model.load_state_dict(best_state)
@@ -185,9 +231,9 @@ def train_model(
             "feature_stds": feature_stds,
             "threshold": threshold,
             "best_val_loss": best_val_loss,
-            "epochs": epochs,
-            "training_files": [p.name for p in pcaps],
-            "n_flows": len(flows),
+            "epochs_run": epochs_run,
+            "training_files": read_files,
+            "n_flows": len(raw),
             "n_excluded": n_excluded,
         },
         str(output_path),
@@ -196,9 +242,11 @@ def train_model(
           f"best val loss {best_val_loss:.6f})")
 
     return {
-        "n_files": len(pcaps),
-        "n_flows": len(flows),
+        "n_files": len(read_files),
+        "skipped_files": skipped_files,
+        "n_flows": len(raw),
         "n_excluded": n_excluded,
+        "epochs_run": epochs_run,
         "threshold": threshold,
         "best_val_loss": best_val_loss,
         "output_path": str(output_path),
@@ -213,7 +261,9 @@ def main():
         "paths", nargs="*",
         help=f"pcap files or directories (default: {config.TRAINING_DIR})",
     )
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=config.LSTM_MAX_EPOCHS,
+                        help="maximum epochs; training stops early once "
+                             "validation loss stops improving")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-size", type=int, default=DEFAULT_HIDDEN_SIZE)

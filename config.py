@@ -47,6 +47,8 @@ LSTM_MODEL_PATH = DATA_DIR / "models" / "lstm_detector.pt"
 LSTM_MAX_SEQ_LEN = 32  # packets per flow the model sees, from the start of the flow
 LSTM_SCORE_BATCH_SIZE = 256  # flows scored per forward pass
 LSTM_MIN_TRAINING_FLOWS = 500  # training refuses smaller datasets
+LSTM_MAX_EPOCHS = 500  # upper bound; early stopping usually ends training sooner
+LSTM_EARLY_STOP_PATIENCE = 30  # epochs without a validation improvement before stopping
 
 # Flows on these ports are never learned as normal traffic
 TRAINING_EXCLUDE_PORTS = {4444, 5555, 6666, 8888, 9999, 1337, 31337, 12345}

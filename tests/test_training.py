@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import gc
 import statistics
+import weakref
 import sys
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from netsentinel.detection.lstm import (
     batch_sequences,
 )
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
+import scripts.train_lstm as train_lstm
 from scripts.train_lstm import TrainingDataError, find_pcaps, fit, train_model
 from tests.traffic import exfil_burst, normal_traffic, port_scan, write_pcap
 
@@ -36,8 +39,8 @@ class TestFit:
         model = FlowLSTMAutoencoder(hidden_size=8)
         x, lengths = _random_batch(40)
 
-        best_state, _ = fit(model, x[:32], lengths[:32], x[32:], lengths[32:],
-                            epochs=2, batch_size=8, learning_rate=1e-2)
+        best_state, _, _ = fit(model, x[:32], lengths[:32], x[32:], lengths[32:],
+                               epochs=2, batch_size=8, learning_rate=1e-2)
         snapshot = copy.deepcopy(best_state)
         with torch.no_grad():
             for param in model.parameters():
@@ -45,6 +48,19 @@ class TestFit:
 
         for name, tensor in best_state.items():
             assert torch.equal(tensor, snapshot[name]), name
+
+
+    def test_stops_once_validation_stops_improving(self):
+        torch.manual_seed(0)
+        model = FlowLSTMAutoencoder(hidden_size=8)
+        x, lengths = _random_batch(40)
+
+        # A zero learning rate never improves on the first epoch's val loss
+        _, _, epochs_run = fit(model, x[:32], lengths[:32], x[32:], lengths[32:],
+                               epochs=100, batch_size=8, learning_rate=0.0,
+                               patience=5)
+
+        assert epochs_run == 6
 
 
 class TestFindPcaps:
@@ -117,3 +133,38 @@ class TestTrainModel:
         anomalous = detector.score(process_packets(PcapFileSource(str(attacks))))
 
         assert statistics.median(anomalous) > 2 * statistics.median(normal)
+
+    def test_unreadable_pcap_is_skipped_not_fatal(self, tmp_path):
+        write_pcap(tmp_path / "good.pcap", normal_traffic(40, seed=5))
+        (tmp_path / "empty.pcapng").write_bytes(b"")
+        (tmp_path / "truncated.pcapng").write_bytes(b"\x0a\x0d\x0d\x0a\x1c\x00")
+
+        summary = train_model([tmp_path], output_path=tmp_path / "m.pt",
+                              epochs=1, min_flows=10)
+
+        assert summary["n_files"] == 1
+        assert summary["skipped_files"] == ["empty.pcapng", "truncated.pcapng"]
+
+    def test_full_packet_lists_are_released_before_training(self, tmp_path, monkeypatch):
+        write_pcap(tmp_path / "w.pcap", normal_traffic(30, seed=6))
+        refs: list[weakref.ref] = []
+        real_process = train_lstm.process_packets
+
+        def tracking_process(source):
+            flows = real_process(source)
+            refs.extend(weakref.ref(f) for f in flows)
+            return flows
+
+        alive_at_fit: list[int] = []
+        real_fit = train_lstm.fit
+
+        def checking_fit(*args, **kwargs):
+            gc.collect()
+            alive_at_fit.append(sum(r() is not None for r in refs))
+            return real_fit(*args, **kwargs)
+
+        monkeypatch.setattr(train_lstm, "process_packets", tracking_process)
+        monkeypatch.setattr(train_lstm, "fit", checking_fit)
+        train_model([tmp_path], output_path=tmp_path / "m.pt", epochs=1, min_flows=10)
+
+        assert alive_at_fit == [0]
