@@ -267,7 +267,12 @@ class CaptureManager:
             self._seen_files.add(path.name)
             self.last_file = path.name
             if self.save_for_training:
-                self._save_for_training(path)
+                try:
+                    self._save_for_training(path)
+                except OSError as e:
+                    # Never let a full or unwritable training dir cost the
+                    # window its analysis or break stop()
+                    self.error = f"Could not save {path.name} for training: {e}"
             if self.analysis_enabled:
                 job = store.create(pcap_path=str(path), pcap_name=path.name)
                 start_job_in_background(job)
@@ -287,7 +292,12 @@ class CaptureManager:
         try:
             os.link(path, target)
         except OSError:
-            shutil.copy2(path, target)
+            try:
+                shutil.copy2(path, target)
+            except OSError:
+                # A partial copy would be mistaken for a complete window
+                target.unlink(missing_ok=True)
+                raise
         self.training_files_saved += 1
 
     def snapshot(self) -> dict:

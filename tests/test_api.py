@@ -277,3 +277,49 @@ class TestTrainingCapture:
         assert _wait_for(lambda: mgr.snapshot()["training_files_saved"] == 1)
         self._finish(mgr, fake_dumpcap)
         assert mgr.snapshot()["training_files_saved"] == 2
+
+
+class TestTrainingSaveFailure:
+    def test_failed_save_still_analyzes_and_stops_cleanly(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready, monkeypatch
+    ):
+        def refuse(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(capture.os, "link", refuse)
+        monkeypatch.setattr(capture.shutil, "copy2", refuse)
+
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10, save_for_training=True)
+        assert _wait_for(lambda: len(fake_dumpcap) == 1), "closed window not analyzed"
+        mgr.stop()
+
+        snap = mgr.snapshot()
+        assert snap["status"] == "stopped"
+        assert len(fake_dumpcap) == 2  # the final window was analyzed too
+        assert snap["training_files_saved"] == 0
+        assert "No space left on device" in snap["error"]
+        for job in fake_dumpcap:
+            job.ingested.set()
+        mgr._cleanup_thread.join(timeout=5)
+        assert list(pcap_dir.glob("live_*.pcapng")) == []
+
+    def test_partial_copy_is_removed(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready, monkeypatch
+    ):
+        def refuse_link(*args, **kwargs):
+            raise OSError(18, "Cross-device link")
+
+        def partial_copy(src, dst, *args, **kwargs):
+            Path(dst).write_bytes(b"partial")
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(capture.os, "link", refuse_link)
+        monkeypatch.setattr(capture.shutil, "copy2", partial_copy)
+
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10, save_for_training=True)
+        assert _wait_for(lambda: len(fake_dumpcap) == 1)
+        mgr.stop()
+
+        assert list(training_dir.iterdir()) == []
