@@ -178,7 +178,10 @@ def capture_start(req: CaptureStartRequest) -> CaptureStatus:
             iface=req.iface,
             duration=req.duration,
             files=req.files,
+            save_for_training=req.save_for_training,
         )
+    except lstm.ModelNotTrainedError as e:
+        raise HTTPException(409, str(e))
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     return CaptureStatus(**manager.snapshot())

@@ -161,7 +161,9 @@ class TestCaptureManager:
     def _rotation_files(self, pcap_dir: Path) -> list[Path]:
         return sorted(pcap_dir.glob("live_*.pcapng"))
 
-    def test_capture_progresses_despite_heavy_stderr(self, fake_dumpcap, pcap_dir):
+    def test_capture_progresses_despite_heavy_stderr(
+        self, fake_dumpcap, pcap_dir, model_ready
+    ):
         mgr = CaptureManager()
         mgr.start(iface="en0", duration=60, files=10)
         try:
@@ -172,7 +174,7 @@ class TestCaptureManager:
             mgr.stop()
 
     def test_stop_analyzes_final_window_and_waits_for_ingest(
-        self, fake_dumpcap, pcap_dir
+        self, fake_dumpcap, pcap_dir, model_ready
     ):
         mgr = CaptureManager()
         mgr.start(iface="en0", duration=60, files=10)
@@ -194,7 +196,7 @@ class TestCaptureManager:
         assert self._rotation_files(pcap_dir) == []
         assert mgr.snapshot()["files_cleaned"] == 2
 
-    def test_startup_failure_reports_dumpcap_error(self, fake_dumpcap):
+    def test_startup_failure_reports_dumpcap_error(self, fake_dumpcap, model_ready):
         mgr = CaptureManager()
         with pytest.raises(RuntimeError, match='no device named "bad"'):
             mgr.start(iface="bad", duration=60, files=10)
@@ -205,3 +207,73 @@ class TestCaptureManager:
         mgr.stop()
         assert mgr.snapshot()["status"] == "stopped"
         assert fake_dumpcap == []
+
+
+@pytest.fixture
+def training_dir(tmp_path, monkeypatch):
+    d = tmp_path / "training"
+    monkeypatch.setattr(config, "TRAINING_DIR", d)
+    return d
+
+
+class TestTrainingCapture:
+    def _finish(self, mgr, submitted):
+        mgr.stop()
+        for job in submitted:
+            job.ingested.set()
+        if mgr._cleanup_thread is not None:
+            mgr._cleanup_thread.join(timeout=5)
+
+    def test_saved_windows_survive_cleanup(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready
+    ):
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10, save_for_training=True)
+        assert _wait_for(lambda: len(list(pcap_dir.glob("live_*.pcapng"))) == 2)
+        self._finish(mgr, fake_dumpcap)
+
+        assert list(pcap_dir.glob("live_*.pcapng")) == []
+        assert sorted(p.name for p in training_dir.iterdir()) == [
+            "live_00001_20261013000000.pcapng", "live_00002_20261013000000.pcapng"]
+        snap = mgr.snapshot()
+        assert snap["training_files_saved"] == 2
+        assert snap["save_for_training"] is True
+        assert len(fake_dumpcap) == 2  # analysis still ran
+
+    def test_toggle_off_saves_nothing(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready
+    ):
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10)
+        assert _wait_for(lambda: len(list(pcap_dir.glob("live_*.pcapng"))) == 2)
+        self._finish(mgr, fake_dumpcap)
+        assert not training_dir.exists() or list(training_dir.iterdir()) == []
+
+    def test_no_model_collects_without_analysis(
+        self, fake_dumpcap, pcap_dir, training_dir, no_model
+    ):
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10, save_for_training=True)
+        assert mgr.snapshot()["analysis_enabled"] is False
+        assert _wait_for(lambda: len(list(pcap_dir.glob("live_*.pcapng"))) == 2)
+        self._finish(mgr, fake_dumpcap)
+
+        assert fake_dumpcap == []
+        assert len(list(training_dir.iterdir())) == 2
+        assert mgr.snapshot()["runs_triggered"] == 0
+
+    def test_no_model_without_toggle_is_refused(self, fake_dumpcap, no_model):
+        res = TestClient(app).post("/capture/start", json={"iface": "en0"})
+        assert res.status_code == 409
+        assert res.json()["detail"] == no_model
+
+    def test_already_saved_window_is_not_saved_twice(
+        self, fake_dumpcap, pcap_dir, training_dir, model_ready
+    ):
+        mgr = CaptureManager()
+        mgr.start(iface="en0", duration=60, files=10, save_for_training=True)
+        assert _wait_for(lambda: len(list(pcap_dir.glob("live_*.pcapng"))) == 2)
+        # The watcher saw the closed window; stop rescans every file.
+        assert _wait_for(lambda: mgr.snapshot()["training_files_saved"] == 1)
+        self._finish(mgr, fake_dumpcap)
+        assert mgr.snapshot()["training_files_saved"] == 2

@@ -6,10 +6,14 @@ user, so /dev/bpf* must be readable (on macOS: `sudo chmod +r /dev/bpf*`).
 
 dumpcap's stderr goes to config.CAPTURE_LOG_PATH rather than a pipe: nothing
 drains a pipe while the capture runs, and a full pipe blocks dumpcap.
+
+Finished windows can also be saved to config.TRAINING_DIR for LSTM training;
+without a trained model, a capture can only collect training data.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
@@ -19,6 +23,7 @@ from typing import BinaryIO
 
 import config
 from api.jobs import Job, start_job_in_background, store
+from netsentinel.detection import lstm
 
 # Candidate dumpcap locations, in priority order.
 _DUMPCAP_CANDIDATES = [
@@ -50,7 +55,9 @@ class CaptureManager:
         self._watcher: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._log: BinaryIO | None = None
-        # Rotation file name -> the job analyzing it, for this session
+        # Rotation files already handled this session, and the job analyzing
+        # each one (only when analysis is enabled)
+        self._seen_files: set[str] = set()
         self._jobs_by_file: dict[str, Job] = {}
         self._cleanup_thread: threading.Thread | None = None
 
@@ -64,14 +71,23 @@ class CaptureManager:
         self.runs_triggered: int = 0
         self.last_file: str | None = None
         self.files_cleaned: int = 0
+        self.save_for_training: bool = False
+        self.analysis_enabled: bool = True
+        self.training_files_saved: int = 0
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def start(self, iface: str, duration: int, files: int) -> None:
+    def start(self, iface: str, duration: int, files: int,
+              save_for_training: bool = False) -> None:
         with self._lock:
             if self.is_running():
                 raise RuntimeError("A capture is already running")
+
+            model_message = lstm.model_status()
+            analysis_enabled = model_message is None
+            if not analysis_enabled and not save_for_training:
+                raise lstm.ModelNotTrainedError(model_message)
 
             dumpcap = find_dumpcap()
             if not dumpcap:
@@ -138,6 +154,10 @@ class CaptureManager:
             self.runs_triggered = 0
             self.last_file = None
             self.files_cleaned = 0
+            self.save_for_training = save_for_training
+            self.analysis_enabled = analysis_enabled
+            self.training_files_saved = 0
+            self._seen_files = set()
             self._jobs_by_file = {}
             self._stop_event.clear()
 
@@ -232,7 +252,8 @@ class CaptureManager:
             self._stop_event.wait(timeout=3.0)
 
     def _submit_rotations(self, include_current: bool) -> None:
-        """Start a job for each rotation file not yet submitted.
+        """Handle each rotation file once: save it for training and/or
+        start a job analyzing it.
 
         While dumpcap runs, the newest file is still being written, so it is
         skipped unless include_current is set (after dumpcap has exited).
@@ -241,16 +262,33 @@ class CaptureManager:
         if not include_current:
             files = files[:-1]
         for path in files:
-            if path.name in self._jobs_by_file:
+            if path.name in self._seen_files:
                 continue
-            job = store.create(
-                pcap_path=str(path),
-                pcap_name=path.name,
-            )
-            start_job_in_background(job)
-            self._jobs_by_file[path.name] = job
-            self.runs_triggered += 1
+            self._seen_files.add(path.name)
             self.last_file = path.name
+            if self.save_for_training:
+                self._save_for_training(path)
+            if self.analysis_enabled:
+                job = store.create(pcap_path=str(path), pcap_name=path.name)
+                start_job_in_background(job)
+                self._jobs_by_file[path.name] = job
+                self.runs_triggered += 1
+
+    def _save_for_training(self, path: Path) -> None:
+        """Keep a training copy that outlives the ring buffer and cleanup.
+
+        A hard link costs no time or space; copy when linking is impossible
+        (e.g. the training dir is on another filesystem).
+        """
+        config.TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+        target = config.TRAINING_DIR / path.name
+        if target.exists():
+            return
+        try:
+            os.link(path, target)
+        except OSError:
+            shutil.copy2(path, target)
+        self.training_files_saved += 1
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -264,6 +302,9 @@ class CaptureManager:
                 "runs_triggered": self.runs_triggered,
                 "last_file": self.last_file,
                 "files_cleaned": self.files_cleaned,
+                "save_for_training": self.save_for_training,
+                "analysis_enabled": self.analysis_enabled,
+                "training_files_saved": self.training_files_saved,
                 "dumpcap_available": find_dumpcap() is not None,
             }
 

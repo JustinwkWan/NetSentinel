@@ -106,6 +106,7 @@ class CaptureStartRequest(BaseModel):
     iface: str = "en0"
     duration: int = 60
     files: int = 10
+    save_for_training: bool = False
 
 
 class CaptureStatus(BaseModel):
@@ -119,6 +120,9 @@ class CaptureStatus(BaseModel):
     last_file: str | None = None
     files_cleaned: int = 0
     dumpcap_available: bool = False
+    save_for_training: bool = False
+    analysis_enabled: bool = True
+    training_files_saved: int = 0
 
 
 class HealthStatus(BaseModel):
