@@ -1,11 +1,9 @@
-"""LstmDetector — LSTM autoencoder anomaly detection for Phase 3.
+"""LstmDetector - LSTM autoencoder over per-packet sequences.
 
-The model learns the pattern of normal network flows. At inference time,
-flows with high reconstruction error are flagged as anomalous.
-
-Features extracted from each FlowRecord:
-  packet_count, byte_count, duration, packet_rate, mean_packet_size,
-  dst_port (log-scaled), src_port (log-scaled)
+Each flow becomes the time-ordered sequence of its first max_seq_len
+packets. One step is one packet, described by STEP_FEATURES. The model
+learns to reconstruct sequences of normal traffic, so flows it
+reconstructs poorly are flagged.
 """
 
 from __future__ import annotations
@@ -15,174 +13,193 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 
 import config
 from netsentinel.detection.base import FlaggedFlow
 from netsentinel.ingestion.flows import FlowRecord
 
-# Feature order must match training
-FEATURE_NAMES = [
-    "packet_count",
-    "byte_count",
-    "duration",
-    "packet_rate",
-    "mean_packet_size",
-    "dst_port",
-    "src_port",
+STEP_FEATURES = [
+    "log_size", "log_gap", "direction", "is_tcp", "syn", "fin", "rst", "psh",
 ]
-NUM_FEATURES = len(FEATURE_NAMES)
+NUM_STEP_FEATURES = len(STEP_FEATURES)
+# The leading features are unbounded and standardized with training
+# statistics; the rest are already in [-1, 1].
+NUM_STANDARDIZED = 2
 
+TCP_FIN = 0x01
+TCP_SYN = 0x02
+TCP_RST = 0x04
+TCP_PSH = 0x08
+
+CHECKPOINT_FORMAT_VERSION = 2
 DEFAULT_HIDDEN_SIZE = 32
 DEFAULT_NUM_LAYERS = 1
 
+NO_MODEL_MESSAGE = (
+    "No compatible LSTM model. Collect training data with the dashboard's "
+    "'Save windows for training' toggle, then run: python scripts/train_lstm.py"
+)
 
-def extract_features(flow: FlowRecord) -> list[float]:
-    """Extract numeric features from a FlowRecord for the LSTM."""
-    return [
-        float(flow.packet_count),
-        float(flow.byte_count),
-        float(flow.duration),
-        flow.packet_rate,
-        flow.mean_packet_size,
-        math.log1p(flow.dst_port),
-        math.log1p(flow.src_port),
-    ]
+
+class ModelNotTrainedError(RuntimeError):
+    """No checkpoint, or one this detector version cannot use."""
+
+
+def encode_flow(flow: FlowRecord, max_len: int) -> torch.Tensor:
+    """Feature rows for the flow's first max_len packets: shape (n, 8)."""
+    is_tcp = 1.0 if flow.protocol == "TCP" else 0.0
+    rows = []
+    prev_ts = None
+    for pkt in flow.packets[:max_len]:
+        gap = 0.0 if prev_ts is None else max(0.0, pkt.timestamp - prev_ts)
+        prev_ts = pkt.timestamp
+        flags = pkt.tcp_flags
+        rows.append([
+            math.log1p(pkt.length),
+            math.log1p(gap),
+            float(pkt.direction),
+            is_tcp,
+            float(bool(flags & TCP_SYN)),
+            float(bool(flags & TCP_FIN)),
+            float(bool(flags & TCP_RST)),
+            float(bool(flags & TCP_PSH)),
+        ])
+    return torch.tensor(rows, dtype=torch.float32).reshape(-1, NUM_STEP_FEATURES)
+
+
+def standardize(seq: torch.Tensor, means: list[float],
+                stds: list[float]) -> torch.Tensor:
+    """Standardize the unbounded leading features with training stats."""
+    out = seq.clone()
+    m = torch.tensor(means, dtype=torch.float32)
+    s = torch.clamp(torch.tensor(stds, dtype=torch.float32), min=1e-8)
+    out[:, :NUM_STANDARDIZED] = (out[:, :NUM_STANDARDIZED] - m) / s
+    return out
+
+
+def batch_sequences(
+    seqs: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero-pad to the longest sequence: x (B, T, 8) and lengths (B,)."""
+    lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
+    return pad_sequence(seqs, batch_first=True), lengths
+
+
+def sequence_errors(x: torch.Tensor, recon: torch.Tensor,
+                    lengths: torch.Tensor) -> torch.Tensor:
+    """Mean squared error per sequence over its real steps only: (B,)."""
+    steps = torch.arange(x.size(1), device=x.device)
+    mask = (steps[None, :] < lengths[:, None].to(x.device)).float()
+    step_err = ((x - recon) ** 2).mean(dim=2)
+    return (step_err * mask).sum(dim=1) / lengths.to(x.device).float()
 
 
 class FlowLSTMAutoencoder(nn.Module):
-    """LSTM autoencoder for flow-level anomaly detection.
+    """Encoder LSTM reads a packet sequence into a fixed-size state; the
+    decoder LSTM rebuilds the sequence from that state alone."""
 
-    Encoder: processes the feature sequence with an LSTM, producing
-    a fixed-size hidden state. Decoder: reconstructs the original
-    feature sequence from that hidden state. Reconstruction error
-    is used as the anomaly score.
-    """
-
-    def __init__(self, input_size: int = NUM_FEATURES,
+    def __init__(self, input_size: int = NUM_STEP_FEATURES,
                  hidden_size: int = DEFAULT_HIDDEN_SIZE,
                  num_layers: int = DEFAULT_NUM_LAYERS):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.encoder = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                               num_layers=num_layers, batch_first=True)
+        # The decoder is driven only by the encoder state; its input is zeros.
+        self.decoder = nn.LSTM(input_size=1, hidden_size=hidden_size,
+                               num_layers=num_layers, batch_first=True)
+        self.output_layer = nn.Linear(hidden_size, input_size)
 
-        # Encoder: takes features as a sequence of length input_size, each of dim 1
-        self.encoder = nn.LSTM(
-            input_size=1,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-        )
-
-        # Decoder: reconstructs the sequence
-        self.decoder = nn.LSTM(
-            input_size=1,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-        )
-
-        # Output projection back to feature dim
-        self.output_layer = nn.Linear(hidden_size, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass. x shape: (batch, seq_len, 1)."""
-        # Encode
-        _, (hidden, cell) = self.encoder(x)
-
-        # Decode: use encoder's final hidden state, feed zeros as input
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """x: (B, T, input_size), lengths: (B,). Returns (B, T, input_size)."""
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True,
+                                      enforce_sorted=False)
+        _, (hidden, cell) = self.encoder(packed)
         batch_size, seq_len, _ = x.shape
         decoder_input = torch.zeros(batch_size, seq_len, 1, device=x.device)
         decoder_output, _ = self.decoder(decoder_input, (hidden, cell))
+        return self.output_layer(decoder_output)
 
-        # Project back
-        reconstruction = self.output_layer(decoder_output)
-        return reconstruction
+
+def load_checkpoint(path: str | Path | None = None) -> dict:
+    """Load a format 2 checkpoint, or raise ModelNotTrainedError."""
+    path = Path(path or config.LSTM_MODEL_PATH)
+    if not path.exists():
+        raise ModelNotTrainedError(NO_MODEL_MESSAGE)
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as e:
+        raise ModelNotTrainedError(
+            f"{NO_MODEL_MESSAGE} (could not read {path}: {e})"
+        ) from e
+    if (not isinstance(checkpoint, dict)
+            or checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION):
+        raise ModelNotTrainedError(NO_MODEL_MESSAGE)
+    return checkpoint
+
+
+def model_status(path: str | Path | None = None) -> str | None:
+    """None when a usable model exists, else the message explaining why not."""
+    try:
+        load_checkpoint(path)
+    except ModelNotTrainedError as e:
+        return str(e)
+    return None
 
 
 class LstmDetector:
-    """Flags flows using an LSTM autoencoder's reconstruction error.
+    """Flags flows whose packet sequence the autoencoder reconstructs poorly.
 
     Satisfies the Detector Protocol: flag(flows) -> list[FlaggedFlow].
     """
 
     def __init__(self, model_path: str | Path | None = None,
                  threshold: float | None = None):
-        self.model_path = Path(model_path or config.LSTM_MODEL_PATH)
-        self.device = torch.device("cpu")
-
-        if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"LSTM model not found at {self.model_path}. "
-                f"Train one first with: python scripts/train_lstm.py"
-            )
-
-        checkpoint = torch.load(self.model_path, map_location=self.device,
-                                weights_only=True)
-
-        # Rebuild the architecture the checkpoint was trained with. Older
-        # checkpoints predate these keys and used the constructor defaults.
+        checkpoint = load_checkpoint(model_path)
         self.model = FlowLSTMAutoencoder(
-            hidden_size=checkpoint.get("hidden_size", DEFAULT_HIDDEN_SIZE),
-            num_layers=checkpoint.get("num_layers", DEFAULT_NUM_LAYERS),
+            hidden_size=checkpoint["hidden_size"],
+            num_layers=checkpoint["num_layers"],
         )
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
-
-        # Priority: explicit argument > threshold calibrated at training > config
-        if threshold is not None:
-            self.threshold = threshold
-        else:
-            self.threshold = checkpoint.get(
-                "threshold", config.LSTM_ANOMALY_THRESHOLD
-            )
-
-        # Load normalization stats from training
+        self.max_seq_len = checkpoint["max_seq_len"]
         self.feature_means = checkpoint["feature_means"]
         self.feature_stds = checkpoint["feature_stds"]
+        self.threshold = (
+            threshold if threshold is not None else checkpoint["threshold"]
+        )
 
-    def _normalize(self, features: list[float]) -> torch.Tensor:
-        """Normalize features using training statistics."""
-        t = torch.tensor(features, dtype=torch.float32)
-        means = torch.tensor(self.feature_means, dtype=torch.float32)
-        stds = torch.tensor(self.feature_stds, dtype=torch.float32)
-        # Avoid division by zero
-        stds = torch.clamp(stds, min=1e-8)
-        return (t - means) / stds
-
-    def _compute_anomaly_score(self, flow: FlowRecord) -> float:
-        """Compute reconstruction error for a single flow."""
-        features = extract_features(flow)
-        normalized = self._normalize(features)
-
-        # Shape: (1, seq_len, 1)
-        x = normalized.unsqueeze(0).unsqueeze(-1)
-
-        with torch.no_grad():
-            reconstruction = self.model(x)
-
-        # Mean squared error as anomaly score
-        mse = torch.mean((x - reconstruction) ** 2).item()
-        return mse
+    def score(self, flows: list[FlowRecord]) -> list[float]:
+        """Reconstruction error per flow. Every flow must have packets."""
+        seqs = [
+            standardize(encode_flow(f, self.max_seq_len),
+                        self.feature_means, self.feature_stds)
+            for f in flows
+        ]
+        scores: list[float] = []
+        batch_size = config.LSTM_SCORE_BATCH_SIZE
+        for start in range(0, len(seqs), batch_size):
+            x, lengths = batch_sequences(seqs[start:start + batch_size])
+            with torch.no_grad():
+                recon = self.model(x, lengths)
+            scores.extend(sequence_errors(x, recon, lengths).tolist())
+        return scores
 
     def flag(self, flows: list[FlowRecord]) -> list[FlaggedFlow]:
-        """Flag flows with reconstruction error above threshold."""
+        # Flows assembled without packets (e.g. hand-built ones) cannot be scored
+        scorable = [f for f in flows if f.packets]
         flagged = []
-
-        for flow in flows:
-            score = self._compute_anomaly_score(flow)
-
+        for flow, score in zip(scorable, self.score(scorable)):
             if score > self.threshold:
-                # Normalize score to 0-1 range (sigmoid-like scaling)
-                normalized_score = min(1.0, score / (score + self.threshold))
-
                 flagged.append(
                     FlaggedFlow(
                         flow=flow,
-                        anomaly_score=normalized_score,
-                        reason=f"LSTM anomaly score {score:.4f} "
+                        anomaly_score=min(1.0, score / (score + self.threshold)),
+                        reason=f"LSTM sequence anomaly score {score:.4f} "
                                f"(threshold {self.threshold:.4f})",
                     )
                 )
-
         return flagged
