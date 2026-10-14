@@ -13,8 +13,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 PCAP_DIR = DATA_DIR / "pcaps"
 THREAT_INTEL_DIR = DATA_DIR / "threat_intel"
 CHROMA_DIR = DATA_DIR / "chroma"
+TRAINING_DIR = DATA_DIR / "training"  # live-capture windows saved for LSTM training
 
-# LLM — supports DeepSeek via Anthropic-compatible API
+# LLM - supports DeepSeek via Anthropic-compatible API
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-pro")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic")
 LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -46,6 +47,12 @@ DETECTOR_TYPE = "stub"  # "stub" or "lstm"
 
 # LSTM detector
 LSTM_MODEL_PATH = DATA_DIR / "models" / "lstm_detector.pt"
+LSTM_MAX_SEQ_LEN = 32  # packets per flow the model sees, from the start of the flow
+LSTM_SCORE_BATCH_SIZE = 256  # flows scored per forward pass
+LSTM_MIN_TRAINING_FLOWS = 500  # training refuses smaller datasets
+
+# Flows on these ports are never learned as normal traffic
+TRAINING_EXCLUDE_PORTS = {4444, 5555, 6666, 8888, 9999, 1337, 31337, 12345}
 LSTM_ANOMALY_THRESHOLD = 1.82  # fallback for checkpoints without one; training: mean + 3*std of reconstruction errors
 
 # StubDetector thresholds

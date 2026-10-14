@@ -22,10 +22,9 @@ from api.models import (
     RunRequest,
     RunSummary,
 )
+from netsentinel.ingestion.sources import PCAP_SUFFIXES
 
-PCAP_SUFFIXES = (".pcap", ".pcapng")
-
-app = FastAPI(title="NetSentinel API", version="0.1.0")
+app =FastAPI(title="NetSentinel API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

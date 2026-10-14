@@ -4,8 +4,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class PacketRecord:
+    """One packet of a flow, as the sequence detector sees it."""
+
+    timestamp: float  # epoch seconds
+    length: int  # frame bytes
+    direction: int  # +1 initiator -> responder, -1 responder -> initiator
+    tcp_flags: int  # raw TCP flags byte; 0 for UDP and other protocols
+
+
+@dataclass
 class FlowRecord:
-    """A single network flow aggregated from packets."""
+    """A bidirectional network flow. src is the endpoint that spoke first."""
 
     src_ip: str
     dst_ip: str
@@ -20,6 +30,9 @@ class FlowRecord:
     # Derived features (computed after assembly)
     packet_rate: float = 0.0  # packets per second
     mean_packet_size: float = 0.0  # bytes per packet
+
+    # Packets in arrival order, both directions
+    packets: list[PacketRecord] = field(default_factory=list, repr=False)
 
     def __post_init__(self):
         self.packet_rate = (
