@@ -108,7 +108,7 @@ PCAP file
    ▼
 ┌──────────────────────────────────────────┐
 │ Layer 2: Detection                       │
-│  detector.flag(flows) -> [FlaggedFlow]   │   stub first, LSTM later
+│  detector.flag(flows) -> [FlaggedFlow]   │   per-packet sequence LSTM
 └──────────────────────────────────────────┘
    │  flows with anomaly scores + metadata
    ▼
@@ -145,7 +145,7 @@ process_packets(source: PacketSource) -> list[FlowRecord]
 
 `PacketSource` is an abstraction. In the MVP there is exactly one implementation, `PcapFileSource`, which reads a `.pcap` with PyShark. The post-MVP `LiveCaptureSource` implements the same interface. Nothing downstream of ingestion knows or cares which source produced the flows.
 
-A `FlowRecord` is a plain data object: source/destination IPs and ports, protocol, packet count, byte count, flow duration, start timestamp, and a small set of derived features (packet rate, mean packet size). These are the features the detector consumes.
+A `FlowRecord` is a plain data object for one bidirectional connection: initiator and responder IPs and ports, protocol, packet count, byte count, flow duration, start timestamp, a small set of derived features (packet rate, mean packet size), and the flow's packets in arrival order (size, timestamp, direction, TCP flags). The detector consumes the packet sequence; the summary fields feed the agent's prompt.
 
 ### Layer 2 — Detection
 

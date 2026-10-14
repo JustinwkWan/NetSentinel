@@ -125,10 +125,11 @@ export function LiveCapturePanel({ modelMessage, onActivity }: Props) {
 
       <div className="flex items-start gap-3">
         <button
+          id="save-for-training"
           type="button"
           role="switch"
           aria-checked={saving}
-          aria-label="Save windows for training"
+          aria-describedby="save-for-training-hint"
           onClick={() => setSaveForTraining((v) => !v)}
           disabled={running || busy}
           className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
@@ -142,14 +143,26 @@ export function LiveCapturePanel({ modelMessage, onActivity }: Props) {
           />
         </button>
         <div>
-          <div className="text-sm text-slate-200">Save windows for training</div>
-          <div className="text-xs text-slate-500">
+          <label
+            htmlFor="save-for-training"
+            className="block text-sm text-slate-200 cursor-pointer select-none"
+          >
+            Save windows for training
+          </label>
+          <div id="save-for-training-hint" className="text-xs text-slate-500">
             Keeps each finished window in data/training/
           </div>
         </div>
       </div>
 
-      {modelMessage && !running && (
+      {status?.save_for_training && (running || status.training_files_saved > 0) && (
+        <div className="text-xs text-cyan-300">
+          {status.training_files_saved} window
+          {status.training_files_saved === 1 ? "" : "s"} saved to data/training/
+        </div>
+      )}
+
+      {modelMessage && !running && !saveForTraining && (
         <div className="text-amber-400 text-xs">
           No trained model yet. Turn on saving to collect training data.
         </div>
@@ -185,18 +198,12 @@ export function LiveCapturePanel({ modelMessage, onActivity }: Props) {
             </div>
           )}
           <div
-            className="grid gap-2 text-center"
-            style={{
-              gridTemplateColumns: `repeat(${
-                1 + Number(status.analysis_enabled) + Number(status.save_for_training)
-              }, minmax(0, 1fr))`,
-            }}
+            className={`grid gap-2 text-center ${
+              status.analysis_enabled ? "grid-cols-2" : "grid-cols-1"
+            }`}
           >
             {status.analysis_enabled && (
               <StatTile value={String(status.runs_triggered)} label="Windows run" />
-            )}
-            {status.save_for_training && (
-              <StatTile value={String(status.training_files_saved)} label="Saved" />
             )}
             <StatTile value={status.last_file ?? "-"} label="Last window" mono />
           </div>

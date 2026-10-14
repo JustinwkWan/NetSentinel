@@ -1,27 +1,17 @@
-import { useEffect, useState } from "react";
-import { api } from "./api";
+import { useState } from "react";
 import { PcapSelector } from "./components/PcapSelector";
 import { RunControls } from "./components/RunControls";
 import { RunStatusPanel } from "./components/RunStatusPanel";
 import { RunHistory } from "./components/RunHistory";
 import { LiveCapturePanel } from "./components/LiveCapturePanel";
 import { LocalBrowser } from "./components/LocalBrowser";
+import { useModelStatus } from "./useModelStatus";
 
 function App() {
   const [selectedPcap, setSelectedPcap] = useState<string | null>(null);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [historyRefresh, setHistoryRefresh] = useState(0);
-  // null = ready (or not yet known); otherwise why runs are unavailable
-  const [modelMessage, setModelMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    api
-      .health()
-      .then((h) => setModelMessage(h.model_ready ? null : h.model_message))
-      .catch(() => {
-        // backend unreachable: run attempts will surface the real error
-      });
-  }, []);
+  const modelMessage = useModelStatus();
 
   const onRunStarted = (jobId: string) => {
     setCurrentJobId(jobId);

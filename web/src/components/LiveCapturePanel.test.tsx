@@ -65,6 +65,36 @@ describe("LiveCapturePanel training switch", () => {
     await act(async () => {});
 
     expect(screen.getByText(/collecting training data only/i)).toBeTruthy();
-    expect(screen.getByText("7")).toBeTruthy();
+    expect(screen.getByText("7 windows saved to data/training/")).toBeTruthy();
+  });
+
+  it("keeps the saved count after the capture stops", async () => {
+    vi.mocked(api.captureStatus).mockResolvedValue(
+      status({ status: "stopped", save_for_training: true, training_files_saved: 1 }),
+    );
+    render(<LiveCapturePanel modelMessage={null} onActivity={() => {}} />);
+    await act(async () => {});
+
+    expect(screen.getByText("1 window saved to data/training/")).toBeTruthy();
+  });
+
+  it("clicking the label toggles the switch", async () => {
+    render(<LiveCapturePanel modelMessage={null} onActivity={() => {}} />);
+    await act(async () => {});
+    const toggle = screen.getByRole("switch", { name: /save windows for training/i });
+
+    fireEvent.click(screen.getByText("Save windows for training"));
+
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("drops the no-model hint once saving is on", async () => {
+    render(<LiveCapturePanel modelMessage="No model" onActivity={() => {}} />);
+    await act(async () => {});
+    expect(screen.queryByText(/turn on saving/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("switch", { name: /save windows for training/i }));
+
+    expect(screen.queryByText(/turn on saving/i)).toBeNull();
   });
 });
