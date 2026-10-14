@@ -10,13 +10,19 @@ from netsentinel.ingestion.flows import FlowRecord, PacketRecord
 
 PCAP_SUFFIXES = (".pcap", ".pcapng")
 
+TCP_SYN = 0x02
+TCP_ACK = 0x10
+WELL_KNOWN_PORT_LIMIT = 1024  # ports below this are taken to be the server side
+
 
 @runtime_checkable
 class PacketSource(Protocol):
     """Source-agnostic interface for packet ingestion."""
 
     def packets(self) -> list[dict]:
-        """Return a list of packet dicts with standardized fields."""
+        """Return a list of packet dicts with standardized fields:
+        src_ip, dst_ip, src_port, dst_port, protocol, length, timestamp,
+        and tcp_flags (0 for non-TCP packets)."""
         ...
 
 
@@ -74,8 +80,8 @@ class PcapFileSource:
 def process_packets(source: PacketSource) -> list[FlowRecord]:
     """Group packets from any source into bidirectional FlowRecords.
 
-    Both directions of a connection share one flow. The endpoint that sent
-    the earliest packet is the initiator and becomes the flow's src.
+    Both directions of a connection share one flow, whose src is the
+    endpoint that initiated the connection (see _initiator).
     """
     packets = sorted(source.packets(), key=lambda p: p["timestamp"])
 
@@ -89,7 +95,9 @@ def process_packets(source: PacketSource) -> list[FlowRecord]:
     records = []
     for pkts in grouped.values():
         first = pkts[0]
-        initiator = (first["src_ip"], first["src_port"])
+        initiator = _initiator(pkts)
+        a = (first["src_ip"], first["src_port"])
+        responder = (first["dst_ip"], first["dst_port"]) if a == initiator else a
         sequence = [
             PacketRecord(
                 timestamp=p["timestamp"],
@@ -102,10 +110,10 @@ def process_packets(source: PacketSource) -> list[FlowRecord]:
         start = sequence[0].timestamp
         records.append(
             FlowRecord(
-                src_ip=first["src_ip"],
-                dst_ip=first["dst_ip"],
-                src_port=first["src_port"],
-                dst_port=first["dst_port"],
+                src_ip=initiator[0],
+                dst_ip=responder[0],
+                src_port=initiator[1],
+                dst_port=responder[1],
                 protocol=first["protocol"],
                 packet_count=len(sequence),
                 byte_count=sum(p.length for p in sequence),
@@ -116,3 +124,24 @@ def process_packets(source: PacketSource) -> list[FlowRecord]:
         )
 
     return records
+
+
+def _initiator(pkts: list[dict]) -> tuple[str, int]:
+    """The (ip, port) that opened the connection.
+
+    A capture window can start mid-connection, so the first packet seen may
+    be the server's. In order of reliability: the sender of a SYN without
+    ACK; else the side not on a well-known port, when exactly one side is;
+    else whoever spoke first.
+    """
+    for p in pkts:
+        if p["tcp_flags"] & TCP_SYN and not p["tcp_flags"] & TCP_ACK:
+            return (p["src_ip"], p["src_port"])
+    first = pkts[0]
+    src = (first["src_ip"], first["src_port"])
+    dst = (first["dst_ip"], first["dst_port"])
+    src_known = src[1] < WELL_KNOWN_PORT_LIMIT
+    dst_known = dst[1] < WELL_KNOWN_PORT_LIMIT
+    if src_known and not dst_known:
+        return dst
+    return src

@@ -64,6 +64,38 @@ class TestBidirectionalFlows:
         assert flows[0].packets == [PacketRecord(1.0, 100, 1, 0)]
 
 
+class TestInitiator:
+    def test_syn_sender_is_initiator_even_if_not_first_seen(self):
+        flows = process_packets(ListSource([
+            _pkt("1.1.1.1", 8080, "10.0.0.1", 50000, 1.0, flags=0x10),  # stray ACK
+            _pkt("10.0.0.1", 50000, "1.1.1.1", 8080, 1.1, flags=0x02),  # SYN
+        ]))
+        assert (flows[0].src_ip, flows[0].src_port) == ("10.0.0.1", 50000)
+        assert [p.direction for p in flows[0].packets] == [-1, 1]
+
+    def test_mid_connection_window_uses_well_known_port_as_server(self):
+        # A long connection split by a capture window: the first packet seen
+        # is the server's reply, and there is no SYN.
+        flows = process_packets(ListSource([
+            _pkt("1.1.1.1", 443, "10.0.0.1", 50000, 1.0, flags=0x18),
+            _pkt("10.0.0.1", 50000, "1.1.1.1", 443, 1.1, flags=0x10),
+        ]))
+        assert flows[0].flow_key == "10.0.0.1:50000->1.1.1.1:443/TCP"
+        assert [p.direction for p in flows[0].packets] == [-1, 1]
+
+    def test_udp_reply_seen_first_uses_well_known_port_as_server(self):
+        flows = process_packets(ListSource([
+            _pkt("8.8.8.8", 53, "10.0.0.1", 51000, 1.0, proto="UDP"),
+        ]))
+        assert flows[0].flow_key == "10.0.0.1:51000->8.8.8.8:53/UDP"
+
+    def test_both_high_ports_fall_back_to_first_sender(self):
+        flows = process_packets(ListSource([
+            _pkt("1.1.1.1", 5223, "10.0.0.1", 50000, 1.0, flags=0x18),
+        ]))
+        assert flows[0].src_ip == "1.1.1.1"
+
+
 class TestPcapParsing:
     def test_tcp_flags_and_udp_zero_flags(self, tmp_path):
         rng = random.Random(1)
