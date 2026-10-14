@@ -2,41 +2,27 @@
 
 from __future__ import annotations
 
-import json
-
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 import config
-from netsentinel.agent.prompts import INVESTIGATION_PROMPT, SYSTEM_PROMPT
-from netsentinel.agent.report import ThreatReport
+from netsentinel.agent.parsing import (
+    as_text,
+    as_text_list,
+    content_to_text,
+    extract_json_object,
+)
+from netsentinel.agent.prompts import (
+    FORCE_REPORT_PROMPT,
+    INVESTIGATION_PROMPT,
+    SYSTEM_PROMPT,
+)
+from netsentinel.agent.report import DEFAULT_SEVERITY, SEVERITIES, ThreatReport
 from netsentinel.agent.state import AgentState
 from netsentinel.agent.tools import TOOLS
 from netsentinel.detection.base import FlaggedFlow
-
-
-def _extract_json(text: str) -> dict | None:
-    """Extract a JSON object from text, handling nested braces properly."""
-    # Find the first '{' and match braces to find the complete object
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start : i + 1])
-                except json.JSONDecodeError:
-                    # This brace pair wasn't valid JSON; try finding the next '{'
-                    return _extract_json(text[start + 1 :])
-    return None
 
 
 def _make_llm(**kwargs):
@@ -54,9 +40,17 @@ def _make_llm(**kwargs):
 
 
 def build_graph():
-    """Build and compile the ReAct agent graph."""
+    """Build and compile the ReAct agent graph.
+
+    agent -> tools -> agent ... until the agent answers without a tool call.
+    The iteration cap is checked only after tool results are in, so the
+    transcript never ends on an unanswered tool call (the API rejects that).
+    """
     llm = _make_llm()
     llm_with_tools = llm.bind_tools(TOOLS)
+    # The transcript holds tool_use/tool_result blocks, so tools must stay
+    # defined; tool_choice "none" makes the model write the report instead.
+    llm_report_only = llm.bind_tools(TOOLS, tool_choice={"type": "none"})
 
     def agent_node(state: AgentState) -> dict:
         response = llm_with_tools.invoke(state["messages"])
@@ -65,28 +59,20 @@ def build_graph():
             "iteration": state["iteration"] + 1,
         }
 
-    def should_continue(state: AgentState) -> str:
-        if state["iteration"] >= state["max_iterations"]:
-            return "force_report"
-
+    def route_after_agent(state: AgentState) -> str:
         last_message = state["messages"][-1]
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools"
-
         return END
 
+    def route_after_tools(state: AgentState) -> str:
+        if state["iteration"] >= state["max_iterations"]:
+            return "force_report"
+        return "agent"
+
     def force_report_node(state: AgentState) -> dict:
-        llm_plain = _make_llm()
-        force_msg = HumanMessage(
-            content=(
-                "You have reached the maximum number of investigation steps. "
-                "Based on all the information gathered so far, produce your "
-                "final threat report now. Respond with a JSON object containing: "
-                "severity, threat_type, summary, evidence (list), cve_ids (list), "
-                "attack_techniques (list), and remediation."
-            )
-        )
-        response = llm_plain.invoke(state["messages"] + [force_msg])
+        force_msg = HumanMessage(content=FORCE_REPORT_PROMPT)
+        response = llm_report_only.invoke(state["messages"] + [force_msg])
         return {"messages": [response]}
 
     tool_node = ToolNode(TOOLS)
@@ -98,11 +84,13 @@ def build_graph():
 
     graph.set_entry_point("agent")
     graph.add_conditional_edges(
-        "agent",
-        should_continue,
-        {"tools": "tools", "force_report": "force_report", END: END},
+        "agent", route_after_agent, {"tools": "tools", END: END}
     )
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {"agent": "agent", "force_report": "force_report"},
+    )
     graph.add_edge("force_report", END)
 
     return graph.compile()
@@ -158,33 +146,26 @@ def investigate_flow(flagged: FlaggedFlow) -> ThreatReport:
 def _parse_report(state: dict, flow_key: str) -> ThreatReport:
     """Extract a ThreatReport from the agent's final message."""
     last_msg = state["messages"][-1]
-    content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+    content = content_to_text(getattr(last_msg, "content", last_msg))
 
-    # Normalize content — some providers return a list of content blocks
-    if isinstance(content, list):
-        content = " ".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
-            for block in content
-        )
-
-    # Try to extract JSON from the response — handles nested objects
-    data = _extract_json(content)
+    data = extract_json_object(content)
     if data:
+        severity = as_text(data.get("severity")).strip().lower()
         return ThreatReport(
             flow_key=flow_key,
-            severity=str(data.get("severity", "medium")),
-            threat_type=str(data.get("threat_type", "unknown")),
-            summary=str(data.get("summary", content[:200])),
-            evidence=data.get("evidence", []),
-            cve_ids=data.get("cve_ids", []),
-            attack_techniques=data.get("attack_techniques", []),
-            remediation=str(data.get("remediation", "")),
+            severity=severity if severity in SEVERITIES else DEFAULT_SEVERITY,
+            threat_type=as_text(data.get("threat_type"), "unknown"),
+            summary=as_text(data.get("summary"), content[:200]),
+            evidence=as_text_list(data.get("evidence")),
+            cve_ids=as_text_list(data.get("cve_ids")),
+            attack_techniques=as_text_list(data.get("attack_techniques")),
+            remediation=as_text(data.get("remediation")),
         )
 
     # Fallback: use the raw text as the summary
     return ThreatReport(
         flow_key=flow_key,
-        severity="medium",
+        severity=DEFAULT_SEVERITY,
         threat_type="unknown",
-        summary=content[:500] if isinstance(content, str) else str(content)[:500],
+        summary=content[:500],
     )

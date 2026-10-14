@@ -30,7 +30,7 @@ function App() {
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-[20rem_1fr] gap-6">
-        <aside className="space-y-6">
+        <aside className="space-y-6 min-w-0">
           <section className="bg-slate-900/60 border border-slate-800 rounded-lg p-4 space-y-4">
             <h2 className="text-sm font-semibold text-slate-200">New run</h2>
             <PcapSelector selected={selectedPcap} onSelect={setSelectedPcap} />
@@ -53,8 +53,8 @@ function App() {
           </section>
         </aside>
 
-        <section className="bg-slate-900/60 border border-slate-800 rounded-lg p-5 min-h-[24rem]">
-          <RunStatusPanel jobId={currentJobId} />
+        <section className="min-w-0 bg-slate-900/60 border border-slate-800 rounded-lg p-5 min-h-[24rem]">
+          <RunStatusPanel key={currentJobId ?? ""} jobId={currentJobId} />
         </section>
       </main>
     </div>

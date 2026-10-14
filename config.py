@@ -36,9 +36,16 @@ DETECTOR_TYPE = "stub"  # "stub" or "lstm"
 
 # LSTM detector
 LSTM_MODEL_PATH = DATA_DIR / "models" / "lstm_detector.pt"
-LSTM_ANOMALY_THRESHOLD = 2.14  # from training: mean + 3*std of reconstruction errors
+LSTM_ANOMALY_THRESHOLD = 1.82  # fallback for checkpoints without one; training: mean + 3*std of reconstruction errors
 
 # StubDetector thresholds
 STUB_SUSPICIOUS_PORTS = {4444, 5555, 6666, 8888, 9999, 1337, 31337, 12345}
 STUB_HIGH_PACKET_RATE = 1000.0  # packets per second
 STUB_HIGH_BYTE_RATE = 1_000_000  # bytes per second
+
+# API
+API_MAX_JOBS_RETAINED = 200  # finished jobs kept in memory; oldest evicted first
+
+# Live capture
+CAPTURE_LOG_PATH = DATA_DIR / "logs" / "dumpcap.log"
+CAPTURE_INGEST_WAIT_SECONDS = 120.0  # max wait for jobs to read a file before it is deleted

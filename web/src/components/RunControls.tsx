@@ -30,7 +30,7 @@ export function RunControls({ pcapName, onRunStarted }: Props) {
       <label className="block text-sm font-medium text-slate-300">Detector</label>
       <div className="flex gap-2">
         <select
-          className="bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
+          className="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
           value={detector}
           onChange={(e) => setDetector(e.target.value as "stub" | "lstm")}
         >
@@ -38,7 +38,7 @@ export function RunControls({ pcapName, onRunStarted }: Props) {
           <option value="lstm">LSTM autoencoder</option>
         </select>
         <button
-          className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-500 rounded px-4 py-2 text-sm font-medium"
+          className="shrink-0 whitespace-nowrap bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-500 rounded px-4 py-2 text-sm font-medium"
           onClick={start}
           disabled={!pcapName || starting}
         >

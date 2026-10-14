@@ -34,6 +34,10 @@ def run_eval(cases: list[EvalCase] | None = None,
     print(f"[*] Running evaluation on {len(cases)} cases...")
     print(f"    Agent model: {config.LLM_MODEL}")
     print(f"    Judge model: {config.EVAL_JUDGE_MODEL}")
+    if config.EVAL_JUDGE_MODEL == config.LLM_MODEL:
+        print("    [!] Judge and agent use the same model; scores may carry "
+              "self-enhancement bias. Set EVAL_JUDGE_MODEL to a different "
+              "model family.")
     print()
 
     results: list[EvalResult] = []

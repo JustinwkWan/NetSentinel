@@ -100,16 +100,34 @@ export interface LocalDirListing {
   pcaps: LocalPcap[];
 }
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, statusText: string, detail: string) {
+    super(`${status} ${statusText}: ${detail}`);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+// A response body can be read only once, so read it as text and then try
+// JSON. FastAPI errors carry `detail` (a string, or a list for 422s); other
+// failures (e.g. a proxy 502 while the backend is down) are plain text.
+function errorDetail(body: string): string {
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown }).detail;
+    if (typeof detail === "string") return detail;
+    if (detail !== undefined) return JSON.stringify(detail);
+  } catch {
+    // not JSON; fall through to the raw body
+  }
+  return body;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, init);
   if (!res.ok) {
-    let detail = "";
-    try {
-      detail = (await res.json()).detail ?? "";
-    } catch {
-      detail = await res.text();
-    }
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    throw new ApiError(res.status, res.statusText, errorDetail(await res.text()));
   }
   return res.json() as Promise<T>;
 }

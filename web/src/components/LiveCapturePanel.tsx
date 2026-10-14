@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type CaptureStatus } from "../api";
+import { CAPTURE_POLL_MS } from "../polling";
 
 interface Props {
   onActivity: () => void;
@@ -18,25 +19,38 @@ export function LiveCapturePanel({ onActivity }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastRunsRef = useRef(0);
-
-  const poll = async () => {
-    try {
-      const s = await api.captureStatus();
-      setStatus(s);
-      if (s.runs_triggered !== lastRunsRef.current) {
-        lastRunsRef.current = s.runs_triggered;
-        onActivity();
-      }
-    } catch {
-      // backend may be momentarily unreachable
-    }
-  };
+  const onActivityRef = useRef(onActivity);
 
   useEffect(() => {
+    onActivityRef.current = onActivity;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    // Chained timeouts rather than setInterval, so a slow response never
+    // overlaps the next request.
+    const poll = async () => {
+      try {
+        const s = await api.captureStatus();
+        if (cancelled) return;
+        setStatus(s);
+        if (s.runs_triggered !== lastRunsRef.current) {
+          lastRunsRef.current = s.runs_triggered;
+          onActivityRef.current();
+        }
+      } catch {
+        // backend may be momentarily unreachable
+      }
+      if (!cancelled) timer = window.setTimeout(poll, CAPTURE_POLL_MS);
+    };
+
     poll();
-    const id = window.setInterval(poll, 3000);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
 
   const start = async () => {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 from pathlib import Path
 
@@ -14,10 +15,61 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import config
 from netsentinel.detection.lstm import (
+    DEFAULT_HIDDEN_SIZE,
     FlowLSTMAutoencoder,
     extract_features,
 )
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
+
+
+def fit(
+    model: FlowLSTMAutoencoder,
+    train_x: torch.Tensor,
+    val_x: torch.Tensor,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+) -> tuple[dict[str, torch.Tensor], float]:
+    """Train the autoencoder and return (best_state, best_val_loss).
+
+    best_state is a detached copy: state_dict() returns references to the
+    live parameters, which later optimizer steps would silently overwrite.
+    """
+    train_loader = DataLoader(
+        TensorDataset(train_x, train_x), batch_size=batch_size, shuffle=True
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+    n_train = len(train_x)
+
+    best_val_loss = float("inf")
+    best_state = None
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        for batch_x, batch_target in train_loader:
+            optimizer.zero_grad()
+            reconstruction = model(batch_x)
+            loss = criterion(reconstruction, batch_target)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * batch_x.size(0)
+        train_loss /= n_train
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(model(val_x), val_x).item()
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"    Epoch {epoch + 1:3d}/{epochs}: "
+                  f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+
+    return best_state, best_val_loss
 
 
 def train_model(
@@ -26,7 +78,7 @@ def train_model(
     epochs: int = 50,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
-    hidden_size: int = 32,
+    hidden_size: int = DEFAULT_HIDDEN_SIZE,
 ) -> None:
     """Train the LSTM autoencoder on flows from a normal traffic PCAP."""
     output_path = output_path or str(config.LSTM_MODEL_PATH)
@@ -65,46 +117,14 @@ def train_model(
     train_x = x[:n_train]
     val_x = x[n_train:]
 
-    train_dataset = TensorDataset(train_x, train_x)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    # Build model
     model = FlowLSTMAutoencoder(hidden_size=hidden_size)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MSELoss()
 
     print(f"[*] Training LSTM autoencoder ({n_train} train, {n - n_train} val)...")
     print(f"    Epochs: {epochs}, Batch size: {batch_size}, LR: {learning_rate}")
 
-    best_val_loss = float("inf")
-    best_state = None
-
-    for epoch in range(epochs):
-        # Training
-        model.train()
-        train_loss = 0.0
-        for batch_x, batch_target in train_loader:
-            optimizer.zero_grad()
-            reconstruction = model(batch_x)
-            loss = criterion(reconstruction, batch_target)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * batch_x.size(0)
-        train_loss /= n_train
-
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            val_reconstruction = model(val_x)
-            val_loss = criterion(val_reconstruction, val_x).item()
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = model.state_dict()
-
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"    Epoch {epoch + 1:3d}/{epochs}: "
-                  f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+    best_state, best_val_loss = fit(
+        model, train_x, val_x, epochs, batch_size, learning_rate
+    )
 
     # Compute threshold from training data reconstruction errors
     model.load_state_dict(best_state)
@@ -117,7 +137,7 @@ def train_model(
         # Threshold: mean + 3 standard deviations
         suggested_threshold = mean_error + 3 * std_error
 
-    print(f"\n[*] Training complete.")
+    print("\n[*] Training complete.")
     print(f"    Best val loss: {best_val_loss:.6f}")
     print(f"    Mean reconstruction error: {mean_error:.6f}")
     print(f"    Suggested threshold: {suggested_threshold:.6f}")
@@ -128,16 +148,18 @@ def train_model(
     torch.save(
         {
             "model_state_dict": best_state,
+            "hidden_size": model.hidden_size,
+            "num_layers": model.num_layers,
             "feature_means": feature_means,
             "feature_stds": feature_stds,
             "threshold": suggested_threshold,
-            "train_loss": best_val_loss,
+            "best_val_loss": best_val_loss,
             "epochs": epochs,
         },
         str(save_path),
     )
     print(f"[*] Model saved to {save_path}")
-    print(f"\n    To use: python -m netsentinel.cli <pcap> --detector lstm")
+    print("\n    To use: python -m netsentinel.cli <pcap> --detector lstm")
     print(f"    Suggested config: LSTM_ANOMALY_THRESHOLD = {suggested_threshold:.6f}")
 
 
@@ -154,7 +176,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden-size", type=int, default=32)
+    parser.add_argument("--hidden-size", type=int, default=DEFAULT_HIDDEN_SIZE)
     parser.add_argument("--output", default=None, help="Model output path")
     args = parser.parse_args()
 

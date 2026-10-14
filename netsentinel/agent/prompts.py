@@ -48,3 +48,10 @@ Reason flagged: {reason}
 Begin your investigation by analyzing the flow details and querying relevant \
 threat intelligence.
 """
+
+FORCE_REPORT_PROMPT = """\
+You have reached the maximum number of investigation steps. Based on all the \
+information gathered so far, produce your final threat report now. Respond \
+with a JSON object containing: severity, threat_type, summary, evidence \
+(list), cve_ids (list), attack_techniques (list), and remediation.
+"""

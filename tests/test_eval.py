@@ -15,8 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.dataset import EvalCase, build_eval_dataset
-from eval.judge import JudgeScores, _extract_json_from_response
+from eval.judge import JudgeScores
 from eval.report import EvalResult, format_eval_summary, save_eval_results
+from netsentinel.agent.parsing import extract_json_object
 from netsentinel.agent.report import ThreatReport
 from netsentinel.detection.base import FlaggedFlow
 from netsentinel.ingestion.flows import FlowRecord
@@ -48,24 +49,24 @@ class TestDataset:
 class TestJudgeJsonExtraction:
     def test_plain_json(self):
         text = '{"severity_accuracy": 5, "threat_classification": 4}'
-        data = _extract_json_from_response(text)
+        data = extract_json_object(text)
         assert data == {"severity_accuracy": 5, "threat_classification": 4}
 
     def test_json_with_surrounding_text(self):
         text = 'Here is my evaluation:\n{"severity_accuracy": 3}\nThanks!'
-        data = _extract_json_from_response(text)
+        data = extract_json_object(text)
         assert data == {"severity_accuracy": 3}
 
     def test_nested_json(self):
         text = '{"a": 1, "b": {"c": 2}}'
-        data = _extract_json_from_response(text)
+        data = extract_json_object(text)
         assert data == {"a": 1, "b": {"c": 2}}
 
     def test_no_json_returns_none(self):
-        assert _extract_json_from_response("no braces here") is None
+        assert extract_json_object("no braces here") is None
 
     def test_invalid_json_returns_none(self):
-        assert _extract_json_from_response("{not valid json}") is None
+        assert extract_json_object("{not valid json}") is None
 
 
 class TestJudgeScores:

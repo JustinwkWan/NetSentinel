@@ -79,7 +79,9 @@ def format_eval_summary(results: list[EvalResult]) -> str:
 
         if r.error:
             lines.append(f"  ERROR: {r.error}")
-            continue
+            if not r.agent_severity:
+                # The agent itself failed, so there is no output to show.
+                continue
 
         lines.append(f"  Agent:    {r.agent_severity} / {r.agent_threat_type}")
         lines.append(f"  Summary:  {r.agent_summary[:150]}...")

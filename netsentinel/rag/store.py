@@ -41,11 +41,13 @@ class RAGStore:
             return formatted
         docs = results["documents"][0]
         metadatas = results["metadatas"][0] if results.get("metadatas") else [{}] * len(docs)
-        distances = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
+        distances = results["distances"][0] if results.get("distances") else [None] * len(docs)
         for doc, meta, dist in zip(docs, metadatas, distances):
             formatted.append({
                 "content": doc,
                 "metadata": meta,
-                "relevance_score": 1.0 - dist,
+                # Raw distance in the collection's metric (L2 by default):
+                # lower is closer. Not a bounded similarity score.
+                "distance": dist,
             })
         return formatted

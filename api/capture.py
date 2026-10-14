@@ -3,6 +3,9 @@ pipeline on each completed rotation.
 
 Only one capture session runs at a time. dumpcap is spawned as the current
 user, so /dev/bpf* must be readable (on macOS: `sudo chmod +r /dev/bpf*`).
+
+dumpcap's stderr goes to config.CAPTURE_LOG_PATH rather than a pipe: nothing
+drains a pipe while the capture runs, and a full pipe blocks dumpcap.
 """
 
 from __future__ import annotations
@@ -12,9 +15,10 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import BinaryIO
 
 import config
-from api.jobs import start_job_in_background, store
+from api.jobs import Job, start_job_in_background, store
 
 # Candidate dumpcap locations, in priority order.
 _DUMPCAP_CANDIDATES = [
@@ -24,6 +28,7 @@ _DUMPCAP_CANDIDATES = [
 ]
 
 CAPTURE_PREFIX = "live"
+_LOG_TAIL_BYTES = 4000
 
 
 def find_dumpcap() -> str | None:
@@ -44,7 +49,10 @@ class CaptureManager:
         self._proc: subprocess.Popen | None = None
         self._watcher: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._processed: set[str] = set()
+        self._log: BinaryIO | None = None
+        # Rotation file name -> the job analyzing it, for this session
+        self._jobs_by_file: dict[str, Job] = {}
+        self._cleanup_thread: threading.Thread | None = None
 
         # Public-ish state (read under _lock)
         self.status: str = "stopped"  # stopped | running | error
@@ -74,6 +82,12 @@ class CaptureManager:
                 )
                 raise RuntimeError(self.error)
 
+            # A previous session may still be waiting to delete its files
+            # once their jobs have read them; let it finish first.
+            if self._cleanup_thread is not None:
+                self._cleanup_thread.join()
+                self._cleanup_thread = None
+
             config.PCAP_DIR.mkdir(parents=True, exist_ok=True)
 
             # Clear any stale live_*.pcapng so the watcher starts fresh
@@ -82,20 +96,26 @@ class CaptureManager:
             out = config.PCAP_DIR / f"{CAPTURE_PREFIX}.pcapng"
             cmd = [
                 dumpcap,
+                "-q",
                 "-i", iface,
                 "-b", f"duration:{duration}",
                 "-b", f"files:{files}",
                 "-w", str(out),
             ]
 
+            # A session where dumpcap died on its own leaves its log open
+            self._close_log()
+            config.CAPTURE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._log = config.CAPTURE_LOG_PATH.open("wb")
             try:
                 self._proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=self._log,
                     start_new_session=True,
                 )
             except Exception as e:
+                self._close_log()
                 self.status = "error"
                 self.error = f"Failed to launch dumpcap: {e}"
                 raise RuntimeError(self.error)
@@ -104,9 +124,9 @@ class CaptureManager:
             # (bad interface, permission denied on /dev/bpf*, etc.)
             time.sleep(0.6)
             if self._proc.poll() is not None:
-                stderr = (self._proc.stderr.read() or b"").decode(errors="replace")
+                self._close_log()
                 self.status = "error"
-                self.error = stderr.strip() or "dumpcap exited immediately"
+                self.error = self._read_log_tail() or "dumpcap exited immediately"
                 self._proc = None
                 raise RuntimeError(self.error)
 
@@ -119,7 +139,8 @@ class CaptureManager:
             self.started_at = time.time()
             self.runs_triggered = 0
             self.last_file = None
-            self._processed = set()
+            self.files_cleaned = 0
+            self._jobs_by_file = {}
             self._stop_event.clear()
 
             self._watcher = threading.Thread(target=self._watch_loop, daemon=True)
@@ -127,6 +148,10 @@ class CaptureManager:
 
     def stop(self) -> None:
         with self._lock:
+            if self._proc is None and self._watcher is None:
+                self.status = "stopped"
+                return
+
             self._stop_event.set()
             if self._proc is not None:
                 self._proc.terminate()
@@ -134,17 +159,47 @@ class CaptureManager:
                     self._proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
+                    self._proc.wait()
                 self._proc = None
+            self._close_log()
 
-            # Let the watcher exit before deleting, so it can't spawn a job
-            # against a file we're about to remove. The watcher doesn't take
-            # self._lock, so joining here is deadlock-free.
+            # Let the watcher exit first so only this thread submits jobs.
+            # The watcher doesn't take self._lock, so joining is deadlock-free.
             if self._watcher is not None:
                 self._watcher.join(timeout=4.0)
                 self._watcher = None
 
-            self.files_cleaned = self._cleanup_capture_files()
+            # dumpcap closes the in-progress rotation when it exits, so every
+            # file is now complete. Analyze the final partial window too.
+            self._submit_rotations(include_current=True)
+
+            # Delete the files only after their jobs have read them, without
+            # blocking this request on ingestion.
+            jobs = list(self._jobs_by_file.values())
+            self._cleanup_thread = threading.Thread(
+                target=self._cleanup_after_ingest, args=(jobs,), daemon=True
+            )
+            self._cleanup_thread.start()
             self.status = "stopped"
+
+    def _cleanup_after_ingest(self, jobs: list[Job]) -> None:
+        deadline = time.monotonic() + config.CAPTURE_INGEST_WAIT_SECONDS
+        for job in jobs:
+            job.ingested.wait(timeout=max(0.0, deadline - time.monotonic()))
+        self.files_cleaned = self._cleanup_capture_files()
+
+    def _close_log(self) -> None:
+        if self._log is not None:
+            self._log.close()
+            self._log = None
+
+    @staticmethod
+    def _read_log_tail() -> str:
+        try:
+            data = config.CAPTURE_LOG_PATH.read_bytes()[-_LOG_TAIL_BYTES:]
+        except OSError:
+            return ""
+        return data.decode(errors="replace").strip()
 
     def _cleanup_capture_files(self) -> int:
         """Delete all live_*.pcapng rotation files. Returns the count removed.
@@ -165,30 +220,30 @@ class CaptureManager:
         """Poll the capture dir; submit each closed rotation exactly once."""
         while not self._stop_event.is_set():
             try:
-                self._submit_closed_rotations()
+                self._submit_rotations(include_current=False)
             except Exception as e:
                 self.error = f"watcher error: {e}"
             # If dumpcap died unexpectedly, reflect that and stop watching
             if self._proc is not None and self._proc.poll() is not None:
                 if not self._stop_event.is_set():
                     self.status = "error"
-                    stderr = b""
-                    if self._proc.stderr:
-                        stderr = self._proc.stderr.read() or b""
                     self.error = (
-                        stderr.decode(errors="replace").strip()
-                        or "dumpcap exited unexpectedly"
+                        self._read_log_tail() or "dumpcap exited unexpectedly"
                     )
                 break
             self._stop_event.wait(timeout=3.0)
 
-    def _submit_closed_rotations(self) -> None:
+    def _submit_rotations(self, include_current: bool) -> None:
+        """Start a job for each rotation file not yet submitted.
+
+        While dumpcap runs, the newest file is still being written, so it is
+        skipped unless include_current is set (after dumpcap has exited).
+        """
         files = sorted(config.PCAP_DIR.glob(f"{CAPTURE_PREFIX}_*.pcapng"))
-        if len(files) <= 1:
-            return
-        # All but the last (still being written) are closed.
-        for path in files[:-1]:
-            if path.name in self._processed:
+        if not include_current:
+            files = files[:-1]
+        for path in files:
+            if path.name in self._jobs_by_file:
                 continue
             job = store.create(
                 pcap_path=str(path),
@@ -196,7 +251,7 @@ class CaptureManager:
                 detector=self.detector,
             )
             start_job_in_background(job)
-            self._processed.add(path.name)
+            self._jobs_by_file[path.name] = job
             self.runs_triggered += 1
             self.last_file = path.name
 

@@ -48,8 +48,8 @@ def cve_lookup(query: str) -> str:
             }
             entries.append(entry)
         return json.dumps(entries, indent=2)
-    except Exception as e:
-        return f"No relevant CVE entries found for this query."
+    except Exception:
+        return "No relevant CVE entries found for this query."
 
 
 @tool
@@ -76,8 +76,8 @@ def attack_technique_lookup(query: str) -> str:
             }
             entries.append(entry)
         return json.dumps(entries, indent=2)
-    except Exception as e:
-        return f"No relevant ATT&CK techniques found for this query."
+    except Exception:
+        return "No relevant ATT&CK techniques found for this query."
 
 
 TOOLS = [cve_lookup, attack_technique_lookup]

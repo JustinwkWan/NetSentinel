@@ -8,6 +8,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 
+import config
 from api.models import (
     FlaggedFlowDTO,
     FlowDTO,
@@ -73,7 +74,13 @@ class Job:
     flagged: list[FlaggedFlowDTO] = field(default_factory=list)
     reports: list[ThreatReportDTO] = field(default_factory=list)
     error: str | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    # Set once the pcap has been read into memory (or the job failed), so a
+    # capture session knows when the file is safe to delete.
+    ingested: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def finished(self) -> bool:
+        return self.status in ("done", "error")
 
     def to_summary(self) -> RunSummary:
         return RunSummary(
@@ -114,7 +121,22 @@ class JobStore:
         )
         with self._lock:
             self._jobs[job_id] = job
+            self._evict_finished_locked()
         return job
+
+    def _evict_finished_locked(self) -> None:
+        """Drop the oldest finished jobs beyond the retention cap.
+
+        Live capture creates a job per rotation, so without a cap the store
+        grows for as long as the server runs. Active jobs are never evicted.
+        """
+        finished = sorted(
+            (j for j in self._jobs.values() if j.finished),
+            key=lambda j: j.started_at,
+        )
+        excess = len(finished) - config.API_MAX_JOBS_RETAINED
+        for job in finished[:max(0, excess)]:
+            del self._jobs[job.job_id]
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
@@ -133,8 +155,10 @@ def run_pipeline(job: Job) -> None:
     """Execute the full pipeline for a job. Updates job state in place."""
     try:
         job.status = "ingesting"
-        source = PcapFileSource(job.pcap_path)
-        flows = process_packets(source)
+        try:
+            flows = process_packets(PcapFileSource(job.pcap_path))
+        finally:
+            job.ingested.set()
         job.n_flows = len(flows)
 
         if not flows:
@@ -189,6 +213,8 @@ def run_pipeline(job: Job) -> None:
         job.status = "error"
         job.error = f"{e}\n{traceback.format_exc()}"
         job.finished_at = time.time()
+    finally:
+        job.ingested.set()
 
 
 def start_job_in_background(job: Job) -> None:

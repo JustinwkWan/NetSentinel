@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, type JobStatus, type RunDetail } from "../api";
+import { api, ApiError, type JobStatus, type RunDetail } from "../api";
+import { RUN_POLL_MS } from "../polling";
 import { ReportCard } from "./ReportCard";
 import { FlaggedFlowRow } from "./FlaggedFlowRow";
 
@@ -25,15 +26,14 @@ const STATUS_COLOR: Record<JobStatus, string> = {
   error: "bg-rose-600",
 };
 
+// The parent keys this component by jobId, so switching runs remounts it
+// with fresh state instead of resetting state inside the effect.
 export function RunStatusPanel({ jobId }: Props) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!jobId) {
-      setDetail(null);
-      return;
-    }
+    if (!jobId) return;
     let cancelled = false;
     let timer: number | null = null;
 
@@ -42,20 +42,22 @@ export function RunStatusPanel({ jobId }: Props) {
         const d = await api.getRun(jobId);
         if (cancelled) return;
         setDetail(d);
-        if (d.status !== "done" && d.status !== "error") {
-          timer = window.setTimeout(poll, 1500);
-        }
+        setError(null);
+        if (d.status === "done" || d.status === "error") return;
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (cancelled) return;
+        setError(String(e));
+        // The run no longer exists (e.g. the backend restarted); retrying
+        // cannot help. Anything else may be transient, so keep polling.
+        if (e instanceof ApiError && e.status === 404) return;
       }
+      timer = window.setTimeout(poll, RUN_POLL_MS);
     };
 
-    setDetail(null);
-    setError(null);
     poll();
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [jobId]);
 
@@ -67,12 +69,12 @@ export function RunStatusPanel({ jobId }: Props) {
     );
   }
 
-  if (error) {
-    return <div className="text-rose-400 text-sm">{error}</div>;
-  }
-
   if (!detail) {
-    return <div className="text-slate-400 text-sm">Loading…</div>;
+    return error ? (
+      <div className="text-rose-400 text-sm">{error}</div>
+    ) : (
+      <div className="text-slate-400 text-sm">Loading…</div>
+    );
   }
 
   const progressPct =
@@ -95,6 +97,12 @@ export function RunStatusPanel({ jobId }: Props) {
           {detail.pcap_name} • {detail.detector}
         </div>
       </div>
+
+      {error && (
+        <div className="text-amber-400 text-xs" role="status">
+          Lost contact with the backend, retrying: {error}
+        </div>
+      )}
 
       {(detail.status === "investigating" || detail.status === "done") && detail.progress_total > 0 && (
         <div>

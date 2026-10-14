@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+DEFAULT_SEVERITY = "medium"
+
 
 @dataclass
 class ThreatReport:
     """Structured output from the agent's investigation."""
 
     flow_key: str
-    severity: str  # "critical", "high", "medium", "low", "info"
+    severity: str  # one of SEVERITIES
     threat_type: str
     summary: str
     evidence: list[str] = field(default_factory=list)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import stat
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -67,19 +68,22 @@ def health() -> dict:
 
 @app.get("/pcaps", response_model=list[PcapInfo])
 def list_pcaps() -> list[PcapInfo]:
-    pcap_dir = _pcap_dir()
-    paths = [
-        p for p in pcap_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in PCAP_SUFFIXES
-    ]
-    return [
-        PcapInfo(
-            name=p.name,
-            size_bytes=p.stat().st_size,
-            modified=p.stat().st_mtime,
+    infos = []
+    for p in sorted(_pcap_dir().iterdir()):
+        if p.suffix.lower() not in PCAP_SUFFIXES:
+            continue
+        # One stat per file, tolerating deletion between listing and stat:
+        # dumpcap's ring buffer removes old rotations from this directory.
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        infos.append(
+            PcapInfo(name=p.name, size_bytes=st.st_size, modified=st.st_mtime)
         )
-        for p in sorted(paths)
-    ]
+    return infos
 
 
 @app.post("/pcaps/upload", response_model=PcapInfo)

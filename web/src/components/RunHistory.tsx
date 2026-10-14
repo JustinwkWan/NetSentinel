@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type RunSummary } from "../api";
+import { HISTORY_POLL_MS } from "../polling";
 
 interface Props {
   currentJobId: string | null;
@@ -32,14 +33,16 @@ export function RunHistory({ currentJobId, onSelect, refreshKey }: Props) {
         const list = await api.listRuns();
         if (!cancelled) setRuns(list);
       } catch {
-        // ignore — backend may not be up yet
+        // ignore - backend may not be up yet
       }
-      timer = window.setTimeout(tick, 3000);
+      // Cleanup can run while the request is in flight; rescheduling after
+      // that would leave an orphaned loop polling forever.
+      if (!cancelled) timer = window.setTimeout(tick, HISTORY_POLL_MS);
     };
     tick();
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [refreshKey]);
 

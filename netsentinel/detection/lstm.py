@@ -32,6 +32,9 @@ FEATURE_NAMES = [
 ]
 NUM_FEATURES = len(FEATURE_NAMES)
 
+DEFAULT_HIDDEN_SIZE = 32
+DEFAULT_NUM_LAYERS = 1
+
 
 def extract_features(flow: FlowRecord) -> list[float]:
     """Extract numeric features from a FlowRecord for the LSTM."""
@@ -55,8 +58,9 @@ class FlowLSTMAutoencoder(nn.Module):
     is used as the anomaly score.
     """
 
-    def __init__(self, input_size: int = NUM_FEATURES, hidden_size: int = 32,
-                 num_layers: int = 1):
+    def __init__(self, input_size: int = NUM_FEATURES,
+                 hidden_size: int = DEFAULT_HIDDEN_SIZE,
+                 num_layers: int = DEFAULT_NUM_LAYERS):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -105,11 +109,8 @@ class LstmDetector:
     def __init__(self, model_path: str | Path | None = None,
                  threshold: float | None = None):
         self.model_path = Path(model_path or config.LSTM_MODEL_PATH)
-        self.threshold = threshold or config.LSTM_ANOMALY_THRESHOLD
         self.device = torch.device("cpu")
 
-        # Load model
-        self.model = FlowLSTMAutoencoder()
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"LSTM model not found at {self.model_path}. "
@@ -118,12 +119,23 @@ class LstmDetector:
 
         checkpoint = torch.load(self.model_path, map_location=self.device,
                                 weights_only=True)
+
+        # Rebuild the architecture the checkpoint was trained with. Older
+        # checkpoints predate these keys and used the constructor defaults.
+        self.model = FlowLSTMAutoencoder(
+            hidden_size=checkpoint.get("hidden_size", DEFAULT_HIDDEN_SIZE),
+            num_layers=checkpoint.get("num_layers", DEFAULT_NUM_LAYERS),
+        )
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
 
-        # Use threshold from checkpoint if not explicitly provided
-        if threshold is None and "threshold" in checkpoint:
-            self.threshold = checkpoint["threshold"]
+        # Priority: explicit argument > threshold calibrated at training > config
+        if threshold is not None:
+            self.threshold = threshold
+        else:
+            self.threshold = checkpoint.get(
+                "threshold", config.LSTM_ANOMALY_THRESHOLD
+            )
 
         # Load normalization stats from training
         self.feature_means = checkpoint["feature_means"]

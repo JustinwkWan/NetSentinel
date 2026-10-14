@@ -15,6 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scapy.all import IP, TCP, UDP, Ether, Raw, wrpcap
 
 
+def build_packet(src_ip: str, dst_ip: str, src_port: int, dst_port: int,
+                 proto: str, frame_size: int):
+    """Build an Ethernet frame of frame_size bytes (or the bare headers if
+    frame_size is smaller). Header size varies by transport: 54 bytes for
+    TCP, 42 for UDP, so the payload is sized from the actual headers."""
+    transport = (
+        TCP(sport=src_port, dport=dst_port)
+        if proto == "TCP"
+        else UDP(sport=src_port, dport=dst_port)
+    )
+    headers = Ether() / IP(src=src_ip, dst=dst_ip) / transport
+    return headers / Raw(b"X" * max(0, frame_size - len(headers)))
+
+
 def generate_normal_traffic(num_flows: int = 500, base_time: float = 1000000.0):
     """Generate packets representing normal network traffic."""
     packets = []
@@ -54,23 +68,7 @@ def generate_normal_traffic(num_flows: int = 500, base_time: float = 1000000.0):
 
         for j in range(num_pkts):
             pkt_size = random.randint(*size_range)
-            payload = Raw(b"X" * max(0, pkt_size - 54))
-
-            if proto == "TCP":
-                pkt = (
-                    Ether()
-                    / IP(src=src_ip, dst=dst_ip)
-                    / TCP(sport=src_port, dport=dst_port)
-                    / payload
-                )
-            else:
-                pkt = (
-                    Ether()
-                    / IP(src=src_ip, dst=dst_ip)
-                    / UDP(sport=src_port, dport=dst_port)
-                    / payload
-                )
-
+            pkt = build_packet(src_ip, dst_ip, src_port, dst_port, proto, pkt_size)
             pkt.time = current_time + j * iat
             packets.append(pkt)
 

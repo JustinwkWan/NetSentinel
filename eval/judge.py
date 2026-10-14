@@ -3,19 +3,22 @@
 Bias mitigations (from Zheng et al., 2023):
   - Rubric-based scoring: scores against specific criteria, not holistic preference
   - Anti-verbosity: explicit instruction not to reward longer responses
-  - Position swap: when feasible, swap orderings and require consistency
-  - Different model family: the judge should ideally be a different model than the agent
+  - Different model family: set EVAL_JUDGE_MODEL to a model other than the agent's
+    (the harness warns when they match)
+
+Position swap is not applied: it mitigates ordering bias in pairwise
+comparisons, and this judge grades a single report against fixed labels.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
+from netsentinel.agent.parsing import content_to_text, extract_json_object
 
 JUDGE_SYSTEM_PROMPT = """\
 You are an expert cybersecurity evaluator. You will be given a network security \
@@ -146,25 +149,6 @@ def _make_judge_llm():
     return ChatAnthropic(**params)
 
 
-def _extract_json_from_response(text: str) -> dict | None:
-    """Extract JSON from judge response."""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
-
-
 def judge_report(case_id: str, report, eval_case) -> JudgeScores:
     """Score an agent's report against ground-truth labels using LLM-as-judge.
 
@@ -202,14 +186,9 @@ def judge_report(case_id: str, report, eval_case) -> JudgeScores:
     ]
 
     response = llm.invoke(messages)
-    content = response.content
-    if isinstance(content, list):
-        content = " ".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
-            for block in content
-        )
+    content = content_to_text(response.content)
 
-    data = _extract_json_from_response(content)
+    data = extract_json_object(content)
 
     if data:
         return JudgeScores(
@@ -226,6 +205,6 @@ def judge_report(case_id: str, report, eval_case) -> JudgeScores:
     # Fallback: couldn't parse judge response
     return JudgeScores(
         case_id=case_id,
-        reasoning=f"Failed to parse judge response",
+        reasoning="Failed to parse judge response",
         raw_response=content,
     )

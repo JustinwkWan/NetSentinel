@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api, type LocalDirListing } from "../api";
 
 interface Props {
@@ -34,10 +34,12 @@ export function LocalBrowser({ onRunStarted }: Props) {
     }
   };
 
-  useEffect(() => {
-    if (open && !listing) browse();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  // Load the home directory the first time the panel opens.
+  const toggle = () => {
+    const opening = !open;
+    setOpen(opening);
+    if (opening && !listing) browse();
+  };
 
   const run = async (path: string) => {
     setRunningPath(path);
@@ -56,7 +58,7 @@ export function LocalBrowser({ onRunStarted }: Props) {
     <section className="bg-slate-900/60 border border-slate-800 rounded-lg p-4 space-y-3">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         className="w-full flex items-center justify-between text-sm font-semibold text-slate-200"
       >
         <span>Browse local folder</span>
