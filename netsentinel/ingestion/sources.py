@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from scapy.all import IP, TCP, UDP, rdpcap
+from scapy.all import IP, TCP, UDP, IPv6, rdpcap
 
 from netsentinel.ingestion.flows import FlowRecord, PacketRecord
 
@@ -44,10 +44,13 @@ class PcapFileSource:
     @staticmethod
     def _parse_packet(pkt) -> dict | None:
         try:
-            if not pkt.haslayer(IP):
+            if pkt.haslayer(IP):
+                ip = pkt[IP]
+            elif pkt.haslayer(IPv6):
+                ip = pkt[IPv6]
+            else:
                 return None
 
-            ip = pkt[IP]
             proto = "OTHER"
             src_port = 0
             dst_port = 0

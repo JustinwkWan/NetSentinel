@@ -111,3 +111,27 @@ class TestPcapParsing:
         assert tcp.packets[1].tcp_flags == 0x12  # SYN-ACK
         assert tcp.packets[1].direction == -1
         assert all(p.tcp_flags == 0 for p in by_proto["UDP"].packets)
+
+    def test_ipv6_packets_form_flows(self, tmp_path):
+        from scapy.all import IPv6, TCP, Ether, wrpcap
+
+        client, server = "2001:db8::10", "2606:4700::1"
+        pkts = []
+        for i, (src, dst, sport, dport, flags) in enumerate([
+            (client, server, 50000, 443, "S"),
+            (server, client, 443, 50000, "SA"),
+            (client, server, 50000, 443, "A"),
+        ]):
+            p = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IPv6(src=src, dst=dst) / TCP(sport=sport, dport=dport, flags=flags)
+            p.time = 100.0 + i * 0.01
+            pkts.append(p)
+        pcap = tmp_path / "v6.pcap"
+        wrpcap(str(pcap), pkts)
+
+        flows = process_packets(PcapFileSource(str(pcap)))
+
+        assert len(flows) == 1
+        flow = flows[0]
+        assert (flow.src_ip, flow.dst_ip) == (client, server)
+        assert [p.direction for p in flow.packets] == [1, -1, 1]
+        assert flow.flow_key == "[2001:db8::10]:50000->[2606:4700::1]:443/TCP"

@@ -44,4 +44,9 @@ class FlowRecord:
 
     @property
     def flow_key(self) -> str:
-        return f"{self.src_ip}:{self.src_port}->{self.dst_ip}:{self.dst_port}/{self.protocol}"
+        return f"{_endpoint(self.src_ip, self.src_port)}->{_endpoint(self.dst_ip, self.dst_port)}/{self.protocol}"
+
+
+def _endpoint(ip: str, port: int) -> str:
+    # IPv6 addresses contain colons, so bracket them as in URLs (RFC 3986)
+    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
