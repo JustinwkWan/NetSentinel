@@ -218,6 +218,25 @@ python -m eval.harness --cases reverse_shell_4444 ssh_brute_force
 Results print a per-case breakdown plus aggregate scores, and `--save` writes
 raw results to `data/eval/eval_results.json`.
 
+### Investigation performance
+
+Flagged flows are investigated in parallel on one shared worker pool, and every LLM call goes through one shared rate limiter.
+Tune them in `config.py`:
+
+| Setting | Controls |
+|---|---|
+| `INVESTIGATION_MAX_CONCURRENCY` | Investigations running at once, across all runs |
+| `LLM_REQUESTS_PER_SECOND`, `LLM_MAX_BURST` | How often LLM requests may start |
+| `LLM_MAX_RETRIES`, `LLM_TIMEOUT_SECONDS` | Retries with backoff on 429/5xx, and per-request timeout |
+
+Measure where the time goes (makes real LLM calls):
+
+```bash
+python scripts/benchmark_investigations.py --label before
+python scripts/benchmark_investigations.py --label after
+python scripts/benchmark_investigations.py --compare data/benchmarks/before-*.json data/benchmarks/after-*.json
+```
+
 ### Run tests
 
 ```bash

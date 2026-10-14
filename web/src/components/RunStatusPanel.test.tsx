@@ -14,6 +14,7 @@ const run = (overrides: Partial<RunDetail> = {}): RunDetail => ({
   n_flows: 3,
   n_flagged: 1,
   n_reports: 0,
+  investigation_s: null,
   error: null,
   flagged: [],
   reports: [],

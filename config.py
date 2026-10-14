@@ -20,6 +20,14 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic")
 LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 LLM_TEMPERATURE = 0.0
 
+# LLM rate limiting (shared by every model call in the process). DeepSeek's
+# documented account limit is 500 concurrent requests for deepseek-v4-pro;
+# these are deliberately far below it to bound cost and load.
+LLM_REQUESTS_PER_SECOND = 1.0  # sustained rate at which requests may start
+LLM_MAX_BURST = 4  # requests that may start back to back after idle time
+LLM_MAX_RETRIES = 4  # SDK retries on 429/5xx/timeouts, exponential backoff
+LLM_TIMEOUT_SECONDS = 120.0  # hard deadline per attempt; normal calls take 2-30s
+
 # RAG
 RETRIEVAL_K = 3
 CHROMA_COLLECTION_CVE = "cve_entries"
@@ -27,6 +35,8 @@ CHROMA_COLLECTION_ATTACK = "attack_techniques"
 
 # Agent
 AGENT_MAX_ITERATIONS = 5
+# Investigations running at once, across all runs (API, live capture, CLI)
+INVESTIGATION_MAX_CONCURRENCY = 4
 
 # Evaluation
 EVAL_JUDGE_MODEL = os.getenv("EVAL_JUDGE_MODEL", LLM_MODEL)

@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import json
+import threading
 
 from langchain_core.tools import tool
 
 from netsentinel.rag.store import RAGStore
 
 _store: RAGStore | None = None
+_store_lock = threading.Lock()
 
 
 def _get_store() -> RAGStore:
+    # Tools run on parallel worker threads; open the store exactly once.
     global _store
-    if _store is None:
-        _store = RAGStore()
-    return _store
+    with _store_lock:
+        if _store is None:
+            _store = RAGStore()
+        return _store
 
 
 def set_store(store: RAGStore) -> None:

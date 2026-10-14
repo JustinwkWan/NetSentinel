@@ -37,6 +37,19 @@ class FlaggedFlowDTO(BaseModel):
     reason: str
 
 
+class TimingDTO(BaseModel):
+    """Where one investigation's time went, in seconds."""
+
+    queued_s: float
+    total_s: float
+    llm_calls: int
+    llm_s: float
+    tool_calls: int
+    tool_s: float
+    input_tokens: int
+    output_tokens: int
+
+
 class ThreatReportDTO(BaseModel):
     flow_key: str
     severity: str
@@ -46,6 +59,7 @@ class ThreatReportDTO(BaseModel):
     cve_ids: list[str] = []
     attack_techniques: list[str] = []
     remediation: str = ""
+    timing: TimingDTO | None = None
 
 
 class RunRequest(BaseModel):
@@ -79,6 +93,7 @@ class RunSummary(BaseModel):
     n_flows: int = 0
     n_flagged: int = 0
     n_reports: int = 0
+    investigation_s: float | None = None
     error: str | None = None
 
 

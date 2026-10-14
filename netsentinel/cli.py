@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 import config
-from netsentinel.agent.graph import investigate_flow
+from netsentinel.agent.scheduler import InvestigationResult, investigate_all
 from netsentinel.detection.stub import StubDetector
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
 
@@ -21,7 +22,7 @@ DETECTORS = {
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NetSentinel — AI network security agent"
+        description="NetSentinel - AI network security agent"
     )
     parser.add_argument("pcap", help="Path to a PCAP file to analyze")
     parser.add_argument(
@@ -50,18 +51,27 @@ def main():
         print("[*] No suspicious flows detected. Exiting.")
         sys.exit(0)
 
-    reports = []
-    for i, ff in enumerate(flagged, 1):
-        print(f"\n[*] Investigating flow {i}/{len(flagged)}: {ff.flow.flow_key}")
-        print(f"    Anomaly score: {ff.anomaly_score:.2f} — {ff.reason}")
-        try:
-            report = investigate_flow(ff)
-            reports.append(report)
-            print(report.format())
-        except Exception as e:
-            print(f"[!] Investigation failed for {ff.flow.flow_key}: {e}")
+    print(f"\n[*] Investigating {len(flagged)} flows...")
+    start = time.perf_counter()
 
-    print(f"\n[*] Done. {len(reports)}/{len(flagged)} flows investigated successfully.")
+    def on_result(index: int, result: InvestigationResult) -> None:
+        ff = result.flagged
+        t = result.timing
+        lines = [
+            f"\n[*] Flow {index + 1}/{len(flagged)}: {ff.flow.flow_key}",
+            f"    Anomaly score: {ff.anomaly_score:.2f} - {ff.reason}",
+            f"    Took {t.total_s:.1f}s: {t.llm_calls} LLM calls ({t.llm_s:.1f}s), "
+            f"{t.tool_calls} tool calls ({t.tool_s:.1f}s)",
+            result.report.format() if result.report is not None
+            else f"[!] Investigation failed for {ff.flow.flow_key}: {result.error}",
+        ]
+        # One print per flow, so output from parallel workers never interleaves
+        print("\n".join(lines))
+
+    results = investigate_all(flagged, on_result=on_result)
+    succeeded = sum(1 for r in results if r.report is not None)
+    print(f"\n[*] Done. {succeeded}/{len(flagged)} flows investigated successfully "
+          f"in {time.perf_counter() - start:.1f}s.")
 
 
 if __name__ == "__main__":

@@ -32,6 +32,17 @@ export interface FlaggedFlowDTO {
   reason: string;
 }
 
+export interface TimingDTO {
+  queued_s: number;
+  total_s: number;
+  llm_calls: number;
+  llm_s: number;
+  tool_calls: number;
+  tool_s: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface ThreatReportDTO {
   flow_key: string;
   severity: string;
@@ -41,6 +52,7 @@ export interface ThreatReportDTO {
   cve_ids: string[];
   attack_techniques: string[];
   remediation: string;
+  timing: TimingDTO | null;
 }
 
 export interface RunSummary {
@@ -53,6 +65,7 @@ export interface RunSummary {
   n_flows: number;
   n_flagged: number;
   n_reports: number;
+  investigation_s: number | null;
   error: string | null;
 }
 

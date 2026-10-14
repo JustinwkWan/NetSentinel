@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -15,6 +18,7 @@ import config
 from api.models import ThreatReportDTO
 from netsentinel.agent import graph, tools
 from netsentinel.agent.parsing import as_text_list, extract_json_object
+from netsentinel.agent.timing import InvestigationTiming
 from netsentinel.detection.base import FlaggedFlow
 from netsentinel.ingestion.flows import FlowRecord
 
@@ -61,26 +65,31 @@ def _check_transcript(messages: list) -> None:
             )
 
 
-class FakeLLM:
-    """Scripted chat model standing in for ChatAnthropic."""
+class FakeLLM(BaseChatModel):
+    """Scripted chat model standing in for ChatAnthropic.
 
-    def __init__(self, responses: list[AIMessage]):
-        self.responses = list(responses)
-        self.calls: list[dict] = []
+    A real BaseChatModel, so LangChain fires the same callbacks it would
+    for the provider's model (which the timing instrumentation relies on).
+    """
+
+    responses: list[AIMessage]
+    calls: list[dict] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
 
     def bind_tools(self, tools_, **kwargs):
-        return _BoundFakeLLM(self, kwargs)
+        return self.bind(**kwargs)
 
-
-class _BoundFakeLLM:
-    def __init__(self, llm: FakeLLM, kwargs: dict):
-        self.llm = llm
-        self.kwargs = kwargs
-
-    def invoke(self, messages):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         _check_transcript(messages)
-        self.llm.calls.append({"kwargs": self.kwargs, "messages": list(messages)})
-        return self.llm.responses.pop(0)
+        self.calls.append({"kwargs": kwargs, "messages": list(messages)})
+        message = self.responses.pop(0)
+        message.usage_metadata = {
+            "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
+        }
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 class EmptyStore:
@@ -97,14 +106,15 @@ def run_agent(monkeypatch):
     monkeypatch.setattr(tools, "_store", EmptyStore())
     monkeypatch.setattr(graph, "_compiled_graph", None)
 
-    def _run(responses: list[AIMessage], max_iterations: int):
-        llm = FakeLLM(responses)
-        monkeypatch.setattr(graph, "_make_llm", lambda **kw: llm)
+    def _run(responses: list[AIMessage], max_iterations: int, timing=None):
+        llm = FakeLLM(responses=responses)
+        monkeypatch.setattr(graph, "make_chat_model", lambda **kw: llm)
         monkeypatch.setattr(config, "AGENT_MAX_ITERATIONS", max_iterations)
         flow = FlowRecord("192.168.1.10", "10.0.0.99", 60000, 4444, "TCP",
                           25, 12000, 30.0, 1000000.0)
         report = graph.investigate_flow(
-            FlaggedFlow(flow=flow, anomaly_score=0.8, reason="port 4444")
+            FlaggedFlow(flow=flow, anomaly_score=0.8, reason="port 4444"),
+            timing=timing,
         )
         return report, llm
 
@@ -135,6 +145,30 @@ class TestIterationCap:
         report, llm = run_agent([_final()], max_iterations=5)
         assert report.threat_type == "reverse shell"
         assert len(llm.calls) == 1
+
+
+class TestTiming:
+    def test_records_every_llm_and_tool_call(self, run_agent):
+        timing = InvestigationTiming()
+        run_agent(
+            [_tool_call("call_1"), _tool_call("call_2"), _final()],
+            max_iterations=2,
+            timing=timing,
+        )
+        assert timing.llm_calls == 3  # two agent turns + forced report
+        assert timing.tool_calls == 2
+        assert timing.input_tokens == 300
+        assert timing.output_tokens == 30
+        assert timing.total_s >= timing.llm_s + timing.tool_s > 0
+
+    def test_total_time_is_recorded_when_the_graph_fails(self, run_agent):
+        timing = InvestigationTiming()
+        with pytest.raises(IndexError):  # scripted model runs out of replies
+            run_agent([_tool_call("call_1")], max_iterations=5, timing=timing)
+        assert timing.total_s > 0
+        # The failed second call still counts; only the first reported usage.
+        assert timing.llm_calls == 2
+        assert timing.input_tokens == 100
 
 
 class TestExtractJsonObject:

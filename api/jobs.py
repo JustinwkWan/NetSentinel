@@ -16,8 +16,10 @@ from api.models import (
     RunDetail,
     RunSummary,
     ThreatReportDTO,
+    TimingDTO,
 )
-from netsentinel.agent.graph import investigate_flow
+from netsentinel.agent.scheduler import InvestigationResult, investigate_all
+from netsentinel.agent.timing import InvestigationTiming
 from netsentinel.detection.base import FlaggedFlow
 from netsentinel.ingestion.flows import FlowRecord
 from netsentinel.ingestion.sources import PcapFileSource, process_packets
@@ -47,6 +49,44 @@ def _flagged_to_dto(ff: FlaggedFlow) -> FlaggedFlowDTO:
     )
 
 
+def _timing_to_dto(timing: InvestigationTiming) -> TimingDTO:
+    return TimingDTO(
+        queued_s=timing.queued_s,
+        total_s=timing.total_s,
+        llm_calls=timing.llm_calls,
+        llm_s=timing.llm_s,
+        tool_calls=timing.tool_calls,
+        tool_s=timing.tool_s,
+        input_tokens=timing.input_tokens,
+        output_tokens=timing.output_tokens,
+    )
+
+
+def _result_to_dto(result: InvestigationResult) -> ThreatReportDTO:
+    timing = _timing_to_dto(result.timing)
+    report = result.report
+    if report is None:
+        # Failed investigations still show up, so the run accounts for them
+        return ThreatReportDTO(
+            flow_key=result.flagged.flow.flow_key,
+            severity="info",
+            threat_type="investigation_failed",
+            summary=f"Agent investigation failed: {result.error}",
+            timing=timing,
+        )
+    return ThreatReportDTO(
+        flow_key=report.flow_key,
+        severity=report.severity,
+        threat_type=report.threat_type,
+        summary=report.summary,
+        evidence=list(report.evidence),
+        cve_ids=list(report.cve_ids),
+        attack_techniques=list(report.attack_techniques),
+        remediation=report.remediation,
+        timing=timing,
+    )
+
+
 def _load_detector(name: str):
     if name == "stub":
         from netsentinel.detection.stub import StubDetector
@@ -71,6 +111,7 @@ class Job:
     n_reports: int = 0
     progress_done: int = 0
     progress_total: int = 0
+    investigation_s: float | None = None  # wall time of the investigate stage
     flagged: list[FlaggedFlowDTO] = field(default_factory=list)
     reports: list[ThreatReportDTO] = field(default_factory=list)
     error: str | None = None
@@ -93,6 +134,7 @@ class Job:
             n_flows=self.n_flows,
             n_flagged=self.n_flagged,
             n_reports=self.n_reports,
+            investigation_s=self.investigation_s,
             error=self.error,
         )
 
@@ -179,33 +221,23 @@ def run_pipeline(job: Job) -> None:
             return
 
         job.status = "investigating"
-        for ff in flagged:
-            try:
-                report = investigate_flow(ff)
-                job.reports.append(
-                    ThreatReportDTO(
-                        flow_key=report.flow_key,
-                        severity=report.severity,
-                        threat_type=report.threat_type,
-                        summary=report.summary,
-                        evidence=list(report.evidence),
-                        cve_ids=list(report.cve_ids),
-                        attack_techniques=list(report.attack_techniques),
-                        remediation=report.remediation,
-                    )
-                )
-                job.n_reports += 1
-            except Exception as e:
-                # One bad flow shouldn't kill the run — log into the report list
-                job.reports.append(
-                    ThreatReportDTO(
-                        flow_key=ff.flow.flow_key,
-                        severity="info",
-                        threat_type="investigation_failed",
-                        summary=f"Agent investigation failed: {e}",
-                    )
-                )
-            job.progress_done += 1
+        # Reports are kept in flagged-flow order even though investigations
+        # may finish out of order; the callback can fire from worker threads.
+        slots: list[ThreatReportDTO | None] = [None] * len(flagged)
+        slots_lock = threading.Lock()
+
+        def on_result(index: int, result: InvestigationResult) -> None:
+            dto = _result_to_dto(result)
+            with slots_lock:
+                slots[index] = dto
+                job.reports = [r for r in slots if r is not None]
+                if result.report is not None:
+                    job.n_reports += 1
+                job.progress_done += 1
+
+        start = time.perf_counter()
+        investigate_all(flagged, on_result=on_result)
+        job.investigation_s = time.perf_counter() - start
 
         job.status = "done"
         job.finished_at = time.time()

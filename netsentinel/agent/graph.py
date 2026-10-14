@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
+import threading
+import time
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -21,22 +23,10 @@ from netsentinel.agent.prompts import (
 )
 from netsentinel.agent.report import DEFAULT_SEVERITY, SEVERITIES, ThreatReport
 from netsentinel.agent.state import AgentState
+from netsentinel.agent.timing import InvestigationTiming, TimingCallback
 from netsentinel.agent.tools import TOOLS
 from netsentinel.detection.base import FlaggedFlow
-
-
-def _make_llm(**kwargs):
-    """Create a ChatAnthropic instance with the configured provider."""
-    params = {
-        "model": config.LLM_MODEL,
-        "temperature": config.LLM_TEMPERATURE,
-        **kwargs,
-    }
-    if config.LLM_BASE_URL:
-        params["base_url"] = config.LLM_BASE_URL
-    if config.LLM_API_KEY:
-        params["api_key"] = config.LLM_API_KEY
-    return ChatAnthropic(**params)
+from netsentinel.llm import make_chat_model
 
 
 def build_graph():
@@ -46,7 +36,7 @@ def build_graph():
     The iteration cap is checked only after tool results are in, so the
     transcript never ends on an unanswered tool call (the API rejects that).
     """
-    llm = _make_llm()
+    llm = make_chat_model()
     llm_with_tools = llm.bind_tools(TOOLS)
     # The transcript holds tool_use/tool_result blocks, so tools must stay
     # defined; tool_choice "none" makes the model write the report instead.
@@ -97,18 +87,30 @@ def build_graph():
 
 
 _compiled_graph = None
+_compiled_graph_lock = threading.Lock()
 
 
 def _get_graph():
-    """Return a compiled graph, building it once and reusing."""
+    """Return a compiled graph, building it once and reusing.
+
+    Investigations run on several worker threads, so the first build is
+    guarded to happen exactly once.
+    """
     global _compiled_graph
-    if _compiled_graph is None:
-        _compiled_graph = build_graph()
-    return _compiled_graph
+    with _compiled_graph_lock:
+        if _compiled_graph is None:
+            _compiled_graph = build_graph()
+        return _compiled_graph
 
 
-def investigate_flow(flagged: FlaggedFlow) -> ThreatReport:
-    """Run the agent investigation on a single flagged flow."""
+def investigate_flow(
+    flagged: FlaggedFlow, timing: InvestigationTiming | None = None
+) -> ThreatReport:
+    """Run the agent investigation on a single flagged flow.
+
+    If timing is given, it is filled with per-call LLM and tool latencies
+    and the investigation's total wall time.
+    """
     graph = _get_graph()
 
     flow = flagged.flow
@@ -138,7 +140,15 @@ def investigate_flow(flagged: FlaggedFlow) -> ThreatReport:
         "max_iterations": config.AGENT_MAX_ITERATIONS,
     }
 
-    final_state = graph.invoke(initial_state)
+    run_config = (
+        {"callbacks": [TimingCallback(timing)]} if timing is not None else None
+    )
+    start = time.perf_counter()
+    try:
+        final_state = graph.invoke(initial_state, config=run_config)
+    finally:
+        if timing is not None:
+            timing.total_s = time.perf_counter() - start
 
     return _parse_report(final_state, flow.flow_key)
 

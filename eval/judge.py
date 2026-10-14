@@ -14,11 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
 from netsentinel.agent.parsing import content_to_text, extract_json_object
+from netsentinel.llm import make_chat_model
 
 JUDGE_SYSTEM_PROMPT = """\
 You are an expert cybersecurity evaluator. You will be given a network security \
@@ -135,18 +135,9 @@ def _make_judge_llm():
     """Create the judge LLM.
 
     Ideally a different model family than the agent to mitigate
-    self-enhancement bias. Uses the same provider for now but
-    could be swapped independently.
+    self-enhancement bias. It shares the agent's provider and rate limit.
     """
-    params = {
-        "model": config.EVAL_JUDGE_MODEL,
-        "temperature": 0.0,
-    }
-    if config.LLM_BASE_URL:
-        params["base_url"] = config.LLM_BASE_URL
-    if config.LLM_API_KEY:
-        params["api_key"] = config.LLM_API_KEY
-    return ChatAnthropic(**params)
+    return make_chat_model(model=config.EVAL_JUDGE_MODEL, temperature=0.0)
 
 
 def judge_report(case_id: str, report, eval_case) -> JudgeScores:
