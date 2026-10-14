@@ -1,7 +1,7 @@
 data/chroma/
 data/threat_intel/*.json
 data/models/
-data/pcaps/normal_traffic.pcap
+data/training/
 data/pcaps/live_*.pcapng
 data/eval/
 .env
