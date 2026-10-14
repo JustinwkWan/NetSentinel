@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "./api";
 import { PcapSelector } from "./components/PcapSelector";
 import { RunControls } from "./components/RunControls";
 import { RunStatusPanel } from "./components/RunStatusPanel";
@@ -10,6 +11,17 @@ function App() {
   const [selectedPcap, setSelectedPcap] = useState<string | null>(null);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [historyRefresh, setHistoryRefresh] = useState(0);
+  // null = ready (or not yet known); otherwise why runs are unavailable
+  const [modelMessage, setModelMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .health()
+      .then((h) => setModelMessage(h.model_ready ? null : h.model_message))
+      .catch(() => {
+        // backend unreachable: run attempts will surface the real error
+      });
+  }, []);
 
   const onRunStarted = (jobId: string) => {
     setCurrentJobId(jobId);
@@ -34,12 +46,17 @@ function App() {
           <section className="bg-slate-900/60 border border-slate-800 rounded-lg p-4 space-y-4">
             <h2 className="text-sm font-semibold text-slate-200">New run</h2>
             <PcapSelector selected={selectedPcap} onSelect={setSelectedPcap} />
-            <RunControls pcapName={selectedPcap} onRunStarted={onRunStarted} />
+            <RunControls
+              pcapName={selectedPcap}
+              modelMessage={modelMessage}
+              onRunStarted={onRunStarted}
+            />
           </section>
 
-          <LocalBrowser onRunStarted={onRunStarted} />
+          <LocalBrowser modelMessage={modelMessage} onRunStarted={onRunStarted} />
 
           <LiveCapturePanel
+            modelMessage={modelMessage}
             onActivity={() => setHistoryRefresh((n) => n + 1)}
           />
 

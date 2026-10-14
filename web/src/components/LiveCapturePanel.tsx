@@ -3,6 +3,7 @@ import { api, type CaptureStatus } from "../api";
 import { CAPTURE_POLL_MS } from "../polling";
 
 interface Props {
+  modelMessage: string | null;
   onActivity: () => void;
 }
 
@@ -12,10 +13,10 @@ const STATUS_BADGE: Record<string, string> = {
   error: "bg-rose-600",
 };
 
-export function LiveCapturePanel({ onActivity }: Props) {
+export function LiveCapturePanel({ modelMessage, onActivity }: Props) {
   const [status, setStatus] = useState<CaptureStatus | null>(null);
   const [iface, setIface] = useState("en0");
-  const [detector, setDetector] = useState<"stub" | "lstm">("lstm");
+  const [saveForTraining, setSaveForTraining] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastRunsRef = useRef(0);
@@ -57,7 +58,12 @@ export function LiveCapturePanel({ onActivity }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const s = await api.captureStart({ iface, duration: 60, files: 10, detector });
+      const s = await api.captureStart({
+        iface,
+        duration: 60,
+        files: 10,
+        save_for_training: saveForTraining,
+      });
       setStatus(s);
     } catch (e) {
       setError(String(e));
@@ -81,6 +87,8 @@ export function LiveCapturePanel({ onActivity }: Props) {
 
   const running = status?.status === "running";
   const dumpcapMissing = status && !status.dumpcap_available;
+  // While running, show what the session was started with
+  const saving = running && status ? status.save_for_training : saveForTraining;
 
   return (
     <section className="bg-slate-900/60 border border-slate-800 rounded-lg p-4 space-y-3">
@@ -99,7 +107,7 @@ export function LiveCapturePanel({ onActivity }: Props) {
 
       {dumpcapMissing && (
         <div className="text-amber-400 text-xs">
-          dumpcap not found — install Wireshark to enable live capture.
+          dumpcap not found - install Wireshark to enable live capture.
         </div>
       )}
 
@@ -115,18 +123,37 @@ export function LiveCapturePanel({ onActivity }: Props) {
         />
       </div>
 
-      <div className="space-y-2">
-        <label className="block text-xs text-slate-400">Detector</label>
-        <select
-          value={detector}
-          onChange={(e) => setDetector(e.target.value as "stub" | "lstm")}
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={saving}
+          aria-label="Save windows for training"
+          onClick={() => setSaveForTraining((v) => !v)}
           disabled={running || busy}
-          className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+          className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+            saving ? "bg-cyan-600" : "bg-slate-700"
+          }`}
         >
-          <option value="stub">Stub (rules)</option>
-          <option value="lstm">LSTM autoencoder</option>
-        </select>
+          <span
+            className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              saving ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+        <div>
+          <div className="text-sm text-slate-200">Save windows for training</div>
+          <div className="text-xs text-slate-500">
+            Keeps each finished window in data/training/
+          </div>
+        </div>
       </div>
+
+      {modelMessage && !running && (
+        <div className="text-amber-400 text-xs">
+          No trained model yet. Turn on saving to collect training data.
+        </div>
+      )}
 
       <div className="text-xs text-slate-500">
         60s windows · 10-file rolling buffer (~10 min)
@@ -143,7 +170,7 @@ export function LiveCapturePanel({ onActivity }: Props) {
       ) : (
         <button
           onClick={start}
-          disabled={busy || !!dumpcapMissing}
+          disabled={busy || !!dumpcapMissing || (!!modelMessage && !saveForTraining)}
           className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 rounded px-4 py-2 text-sm font-medium"
         >
           {busy ? "Starting…" : "Start capture"}
@@ -151,22 +178,27 @@ export function LiveCapturePanel({ onActivity }: Props) {
       )}
 
       {running && status && (
-        <div className="grid grid-cols-2 gap-2 text-center pt-1">
-          <div className="bg-slate-800/60 border border-slate-700 rounded px-2 py-1.5">
-            <div className="text-lg font-semibold text-slate-100">
-              {status.runs_triggered}
+        <div className="space-y-2 pt-1">
+          {!status.analysis_enabled && (
+            <div className="text-amber-400 text-xs">
+              No trained model - collecting training data only
             </div>
-            <div className="text-[10px] text-slate-400 uppercase tracking-wide">
-              Windows run
-            </div>
-          </div>
-          <div className="bg-slate-800/60 border border-slate-700 rounded px-2 py-1.5">
-            <div className="text-xs font-mono text-slate-300 truncate pt-1">
-              {status.last_file ?? "—"}
-            </div>
-            <div className="text-[10px] text-slate-400 uppercase tracking-wide">
-              Last window
-            </div>
+          )}
+          <div
+            className="grid gap-2 text-center"
+            style={{
+              gridTemplateColumns: `repeat(${
+                1 + Number(status.analysis_enabled) + Number(status.save_for_training)
+              }, minmax(0, 1fr))`,
+            }}
+          >
+            {status.analysis_enabled && (
+              <StatTile value={String(status.runs_triggered)} label="Windows run" />
+            )}
+            {status.save_for_training && (
+              <StatTile value={String(status.training_files_saved)} label="Saved" />
+            )}
+            <StatTile value={status.last_file ?? "-"} label="Last window" mono />
           </div>
         </div>
       )}
@@ -184,5 +216,31 @@ export function LiveCapturePanel({ onActivity }: Props) {
         </div>
       )}
     </section>
+  );
+}
+
+function StatTile({
+  value,
+  label,
+  mono = false,
+}: {
+  value: string;
+  label: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="bg-slate-800/60 border border-slate-700 rounded px-2 py-1.5 min-w-0">
+      <div
+        className={
+          mono
+            ? "text-xs font-mono text-slate-300 truncate pt-1"
+            : "text-lg font-semibold text-slate-100"
+        }
+        title={value}
+      >
+        {value}
+      </div>
+      <div className="text-[10px] text-slate-400 uppercase tracking-wide">{label}</div>
+    </div>
   );
 }

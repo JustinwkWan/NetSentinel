@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, type LocalDirListing } from "../api";
 
 interface Props {
+  modelMessage: string | null;
   onRunStarted: (jobId: string) => void;
 }
 
@@ -11,11 +12,10 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function LocalBrowser({ onRunStarted }: Props) {
+export function LocalBrowser({ modelMessage, onRunStarted }: Props) {
   const [open, setOpen] = useState(false);
   const [listing, setListing] = useState<LocalDirListing | null>(null);
   const [pathInput, setPathInput] = useState("");
-  const [detector, setDetector] = useState<"stub" | "lstm">("stub");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runningPath, setRunningPath] = useState<string | null>(null);
@@ -45,7 +45,7 @@ export function LocalBrowser({ onRunStarted }: Props) {
     setRunningPath(path);
     setError(null);
     try {
-      const summary = await api.createRunFromPath(path, detector);
+      const summary = await api.createRunFromPath(path);
       onRunStarted(summary.job_id);
     } catch (e) {
       setError(String(e));
@@ -85,17 +85,9 @@ export function LocalBrowser({ onRunStarted }: Props) {
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-slate-400">Detector</label>
-            <select
-              value={detector}
-              onChange={(e) => setDetector(e.target.value as "stub" | "lstm")}
-              className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500"
-            >
-              <option value="stub">Stub</option>
-              <option value="lstm">LSTM</option>
-            </select>
-          </div>
+          {modelMessage && (
+            <div className="text-amber-400 text-xs">{modelMessage}</div>
+          )}
 
           {loading && <div className="text-slate-400 text-xs">Loading…</div>}
           {error && <div className="text-rose-400 text-xs break-words">{error}</div>}
@@ -132,8 +124,8 @@ export function LocalBrowser({ onRunStarted }: Props) {
                   </span>
                   <button
                     onClick={() => run(p.path)}
-                    disabled={runningPath === p.path}
-                    className="bg-cyan-700 hover:bg-cyan-600 disabled:bg-slate-700 rounded px-2 py-0.5 text-[11px] font-medium"
+                    disabled={runningPath === p.path || !!modelMessage}
+                    className="bg-cyan-700 hover:bg-cyan-600 disabled:bg-slate-700 disabled:text-slate-500 rounded px-2 py-0.5 text-[11px] font-medium"
                   >
                     {runningPath === p.path ? "…" : "Run"}
                   </button>

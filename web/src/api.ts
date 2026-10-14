@@ -58,7 +58,6 @@ export interface ThreatReportDTO {
 export interface RunSummary {
   job_id: string;
   pcap_name: string;
-  detector: string;
   status: JobStatus;
   started_at: number;
   finished_at: number | null;
@@ -84,19 +83,27 @@ export interface CaptureStatus {
   iface: string | null;
   duration: number;
   files: number;
-  detector: string;
   started_at: number | null;
   runs_triggered: number;
   last_file: string | null;
   files_cleaned: number;
   dumpcap_available: boolean;
+  save_for_training: boolean;
+  analysis_enabled: boolean;
+  training_files_saved: number;
 }
 
 export interface CaptureStartRequest {
   iface: string;
   duration: number;
   files: number;
-  detector: "stub" | "lstm";
+  save_for_training: boolean;
+}
+
+export interface HealthStatus {
+  status: "ok";
+  model_ready: boolean;
+  model_message: string | null;
 }
 
 export interface LocalPcap {
@@ -152,17 +159,18 @@ export const api = {
     form.append("file", file);
     return req<PcapInfo>("/pcaps/upload", { method: "POST", body: form });
   },
-  createRun: (pcap_name: string, detector: "stub" | "lstm") =>
+  health: () => req<HealthStatus>("/health"),
+  createRun: (pcap_name: string) =>
     req<RunSummary>("/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pcap_name, detector }),
+      body: JSON.stringify({ pcap_name }),
     }),
-  createRunFromPath: (pcap_path: string, detector: "stub" | "lstm") =>
+  createRunFromPath: (pcap_path: string) =>
     req<RunSummary>("/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pcap_path, detector }),
+      body: JSON.stringify({ pcap_path }),
     }),
   browseLocal: (path?: string) =>
     req<LocalDirListing>(

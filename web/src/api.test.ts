@@ -38,7 +38,7 @@ describe("api error handling", () => {
   });
 
   it("serializes structured validation details", async () => {
-    const detail = [{ loc: ["body", "detector"], msg: "bad value" }];
+    const detail = [{ loc: ["body", "pcap_name"], msg: "bad value" }];
     stubFetch(JSON.stringify({ detail }), 422, "Unprocessable Entity");
     const err = await captureError();
     expect(err.message).toContain(JSON.stringify(detail));

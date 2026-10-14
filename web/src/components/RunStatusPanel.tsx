@@ -94,7 +94,7 @@ export function RunStatusPanel({ jobId }: Props) {
           <span className="text-xs text-slate-500 font-mono">{detail.job_id}</span>
         </div>
         <div className="text-xs text-slate-400">
-          {detail.pcap_name} • {detail.detector}
+          {detail.pcap_name}
         </div>
       </div>
 

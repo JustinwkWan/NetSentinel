@@ -7,7 +7,6 @@ import { RunStatusPanel } from "./RunStatusPanel";
 const run = (overrides: Partial<RunDetail> = {}): RunDetail => ({
   job_id: "job1",
   pcap_name: "sample.pcap",
-  detector: "stub",
   status: "investigating",
   started_at: 1_000_000,
   finished_at: null,
