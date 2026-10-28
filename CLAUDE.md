@@ -69,6 +69,9 @@ pytest tests/
 
 # Run evaluation
 python -m eval.harness
+
+# Measure detector false alarm and detection rates
+python -m eval.detector_metrics
 ```
 
 ## Out of Scope for MVP
