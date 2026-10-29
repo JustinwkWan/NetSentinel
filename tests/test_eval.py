@@ -1,7 +1,7 @@
-"""Tests for the evaluation harness — dataset, judge parsing, and reporting.
+"""Tests for the evaluation harness: dataset, judge, harness, and reporting.
 
-These tests cover everything except the actual LLM calls. The judge's LLM
-invocation is exercised separately by running the harness end-to-end.
+The agent and judge models are replaced with scripted stand-ins, so no
+test makes a real LLM call.
 """
 
 from __future__ import annotations
@@ -14,8 +14,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config
+from eval import harness, judge
 from eval.dataset import EvalCase, build_eval_dataset
-from eval.judge import JudgeScores
+from eval.judge import JudgeScores, judge_report
 from eval.report import EvalResult, format_eval_summary, save_eval_results
 from netsentinel.agent.parsing import extract_json_object
 from netsentinel.agent.report import ThreatReport
@@ -150,3 +152,131 @@ class TestReportFormatting:
         assert len(data) == 1
         assert data[0]["case_id"] == "case1"
         assert data[0]["scores"]["total"] == 19
+
+
+def _case(case_id="reverse_shell_4444") -> EvalCase:
+    return next(c for c in build_eval_dataset() if c.id == case_id)
+
+
+def _report(**overrides) -> ThreatReport:
+    fields = {"flow_key": "a->b/TCP", "severity": "critical",
+              "threat_type": "reverse shell", "summary": "Shell on 4444."}
+    return ThreatReport(**{**fields, **overrides})
+
+
+class ScriptedJudge:
+    def __init__(self, content):
+        self.content, self.messages = content, None
+
+    def invoke(self, messages):
+        self.messages = messages
+
+        class Response:
+            content = self.content
+
+        return Response()
+
+
+class TestJudgeReport:
+    def _judge(self, monkeypatch, content, report=None):
+        llm = ScriptedJudge(content)
+        monkeypatch.setattr(judge, "_make_judge_llm", lambda: llm)
+        return judge_report("case", report or _report(), _case()), llm
+
+    def test_scores_are_parsed_from_the_reply(self, monkeypatch):
+        reply = ('Here you go: {"severity_accuracy": 5, "threat_classification": "4", '
+                 '"evidence_quality": 3, "reasoning_quality": 5, "actionability": 4, '
+                 '"reasoning": "Close."}')
+        scores, _ = self._judge(monkeypatch, reply)
+        assert (scores.severity_accuracy, scores.threat_classification, scores.total) == (5, 4, 21)
+        assert scores.reasoning == "Close." and scores.raw_response == reply
+
+    def test_prompt_holds_report_and_ground_truth(self, monkeypatch):
+        report = _report(evidence=["dst port 4444"], cve_ids=["CVE-1"],
+                         attack_techniques=["T1059"], remediation="Isolate.")
+        _, llm = self._judge(monkeypatch, "{}", report)
+        system, prompt = (m.content for m in llm.messages)
+        assert "Do NOT reward verbose reports" in system
+        for text in ("Severity: critical", "Evidence: dst port 4444", "CVE IDs: CVE-1",
+                     "ATT&CK Techniques: T1059", "Remediation: Isolate.",
+                     "Expected Severity: critical", "Expected Threat Type: reverse shell"):
+            assert text in prompt
+
+    def test_empty_report_fields_read_none(self, monkeypatch):
+        _, llm = self._judge(monkeypatch, "{}")
+        prompt = llm.messages[1].content
+        for field_name in ("Evidence", "CVE IDs", "ATT&CK Techniques", "Remediation"):
+            assert f"{field_name}: none" in prompt
+
+    def test_unparseable_reply_scores_zero(self, monkeypatch):
+        scores, _ = self._judge(monkeypatch, "I refuse to grade this.")
+        assert scores.total == 0
+        assert scores.reasoning == "Failed to parse judge response"
+        assert scores.raw_response == "I refuse to grade this."
+
+
+class TestHarness:
+    @pytest.fixture
+    def stubs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        state = {"agent_fails": set(), "judge_fails": set()}
+
+        def investigate_flow(flagged):
+            if flagged.flow.dst_port in state["agent_fails"]:
+                raise RuntimeError("LLM timed out")
+            return _report(flow_key=flagged.flow.flow_key)
+
+        def judge_report(case_id, report, case):
+            if case_id in state["judge_fails"]:
+                raise RuntimeError("judge offline")
+            return JudgeScores(case_id=case_id, severity_accuracy=5,
+                               threat_classification=5, evidence_quality=4,
+                               reasoning_quality=4, actionability=4)
+
+        monkeypatch.setattr(harness, "investigate_flow", investigate_flow)
+        monkeypatch.setattr(harness, "judge_report", judge_report)
+        return state
+
+    def test_scores_every_case(self, stubs):
+        cases = build_eval_dataset()[:3]
+        results = harness.run_eval(cases)
+        assert [r.case_id for r in results] == [c.id for c in cases]
+        assert all(r.scores.total == 22 and not r.error for r in results)
+        assert results[0].agent_severity == "critical"
+
+    def test_agent_and_judge_failures_are_recorded_per_case(self, stubs):
+        shell, scan, ssh = (_case(i) for i in
+                            ("reverse_shell_4444", "port_scan_31337", "ssh_brute_force"))
+        stubs["agent_fails"].add(scan.flagged_flow.flow.dst_port)
+        stubs["judge_fails"].add(ssh.id)
+
+        results = harness.run_eval([shell, scan, ssh])
+
+        assert results[0].scores.total == 22
+        assert results[1].error == "Agent failed: LLM timed out" and results[1].scores is None
+        assert results[2].error == "Judge failed: judge offline"
+        assert results[2].agent_threat_type == "reverse shell"
+
+    def test_save_writes_results(self, stubs, tmp_path):
+        harness.run_eval([_case()], save=True)
+        saved = json.loads((tmp_path / "eval" / "eval_results.json").read_text())
+        assert [r["case_id"] for r in saved] == ["reverse_shell_4444"]
+
+    def test_same_model_warning(self, stubs, monkeypatch, capsys):
+        monkeypatch.setattr(config, "EVAL_JUDGE_MODEL", config.LLM_MODEL)
+        harness.run_eval([_case()])
+        assert "self-enhancement bias" in capsys.readouterr().out
+
+    def test_cli_runs_selected_cases(self, stubs, monkeypatch):
+        ran = []
+        monkeypatch.setattr(harness, "run_eval",
+                            lambda cases, save: ran.append(([c.id for c in cases], save)))
+        monkeypatch.setattr(sys, "argv", ["harness", "--cases", "dns_tunnel", "--save"])
+        harness.main()
+        assert ran == [(["dns_tunnel"], True)]
+
+    def test_cli_rejects_unknown_cases(self, stubs, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["harness", "--cases", "nope"])
+        with pytest.raises(SystemExit) as exc:
+            harness.main()
+        assert exc.value.code == 1

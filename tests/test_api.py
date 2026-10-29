@@ -121,6 +121,180 @@ class TestListPcaps:
         assert [p["name"] for p in res.json()] == ["kept.pcap"]
 
 
+class TestPcapRoutes:
+    def test_lists_only_pcap_files_in_name_order(self, pcap_dir):
+        (pcap_dir / "b.pcapng").write_bytes(b"x" * 7)
+        (pcap_dir / "a.PCAP").write_bytes(b"")
+        (pcap_dir / "notes.txt").write_text("not a capture")
+        (pcap_dir / "dir.pcap").mkdir()
+
+        body = TestClient(app).get("/pcaps").json()
+
+        assert [(p["name"], p["size_bytes"]) for p in body] == [("a.PCAP", 0), ("b.pcapng", 7)]
+
+    def test_upload_saves_the_file(self, pcap_dir):
+        res = TestClient(app).post(
+            "/pcaps/upload", files={"file": ("cap.pcap", b"\xd4\xc3\xb2\xa1", "application/octet-stream")})
+        assert res.status_code == 200
+        assert res.json()["name"] == "cap.pcap" and res.json()["size_bytes"] == 4
+        assert (pcap_dir / "cap.pcap").read_bytes() == b"\xd4\xc3\xb2\xa1"
+
+    def test_upload_strips_directories_from_the_name(self, pcap_dir):
+        res = TestClient(app).post(
+            "/pcaps/upload", files={"file": ("../../evil.pcap", b"x", "application/octet-stream")})
+        assert res.json()["name"] == "evil.pcap"
+        assert (pcap_dir / "evil.pcap").exists()
+        assert not (pcap_dir.parent.parent / "evil.pcap").exists()
+
+    def test_upload_rejects_other_file_types(self, pcap_dir):
+        res = TestClient(app).post(
+            "/pcaps/upload", files={"file": ("run.sh", b"x", "text/plain")})
+        assert res.status_code == 400
+        assert list(pcap_dir.iterdir()) == []
+
+
+@pytest.fixture
+def submitted(monkeypatch):
+    jobs = []
+    monkeypatch.setattr("api.main.start_job_in_background", jobs.append)
+    return jobs
+
+
+class TestRunRoutes:
+    def test_run_on_a_listed_pcap(self, pcap_dir, model_ready, submitted):
+        (pcap_dir / "x.pcap").write_bytes(b"")
+        client = TestClient(app)
+
+        res = client.post("/runs", json={"pcap_name": "x.pcap"})
+
+        assert res.status_code == 200
+        run = res.json()
+        assert (run["pcap_name"], run["status"]) == ("x.pcap", "pending")
+        assert [j.pcap_path for j in submitted] == [str(pcap_dir / "x.pcap")]
+        assert client.get(f"/runs/{run['job_id']}").json()["job_id"] == run["job_id"]
+        assert run["job_id"] in [r["job_id"] for r in client.get("/runs").json()]
+
+    def test_run_on_a_local_path(self, tmp_path, model_ready, submitted):
+        pcap = tmp_path / "elsewhere" / "cap.pcapng"
+        pcap.parent.mkdir()
+        pcap.write_bytes(b"")
+
+        res = TestClient(app).post("/runs", json={"pcap_path": str(pcap)})
+
+        assert res.status_code == 200
+        assert res.json()["pcap_name"] == "cap.pcapng"
+        assert submitted[0].pcap_path == str(pcap.resolve())
+
+    @pytest.mark.parametrize("body", [{}, {"pcap_name": "a.pcap", "pcap_path": "/a.pcap"}])
+    def test_exactly_one_source_is_required(self, body, model_ready, submitted):
+        assert TestClient(app).post("/runs", json=body).status_code == 400
+        assert submitted == []
+
+    @pytest.mark.parametrize("name", ["../secret.pcap", "a/b.pcap", "a\\b.pcap", ".hidden.pcap"])
+    def test_pcap_names_cannot_leave_the_pcap_dir(self, name, pcap_dir, model_ready, submitted):
+        res = TestClient(app).post("/runs", json={"pcap_name": name})
+        assert res.status_code == 400
+        assert submitted == []
+
+    def test_unknown_pcap_name_is_404(self, pcap_dir, model_ready, submitted):
+        assert TestClient(app).post("/runs", json={"pcap_name": "nope.pcap"}).status_code == 404
+
+    def test_local_path_must_exist_and_be_a_pcap(self, tmp_path, model_ready, submitted):
+        text = tmp_path / "notes.txt"
+        text.write_text("x")
+        client = TestClient(app)
+        assert client.post("/runs", json={"pcap_path": str(text)}).status_code == 400
+        assert client.post("/runs", json={"pcap_path": str(tmp_path / "gone.pcap")}).status_code == 404
+        assert submitted == []
+
+    def test_unknown_run_is_404(self):
+        assert TestClient(app).get("/runs/does-not-exist").status_code == 404
+
+
+class TestLocalBrowse:
+    def test_lists_visible_dirs_and_pcaps(self, tmp_path):
+        (tmp_path / "Captures").mkdir()
+        (tmp_path / ".cache").mkdir()
+        (tmp_path / "b.pcap").write_bytes(b"xy")
+        (tmp_path / "A.pcapng").write_bytes(b"")
+        (tmp_path / "readme.md").write_text("x")
+
+        body = TestClient(app).get("/local/browse", params={"path": str(tmp_path)}).json()
+
+        assert body["path"] == str(tmp_path.resolve())
+        assert body["parent"] == str(tmp_path.resolve().parent)
+        assert body["dirs"] == ["Captures"]
+        assert [(p["name"], p["size_bytes"]) for p in body["pcaps"]] == [("A.pcapng", 0), ("b.pcap", 2)]
+
+    def test_defaults_to_home(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+        assert TestClient(app).get("/local/browse").json()["path"] == str(tmp_path.resolve())
+
+    def test_filesystem_root_has_no_parent(self):
+        assert TestClient(app).get("/local/browse", params={"path": "/"}).json()["parent"] is None
+
+    def test_file_is_not_a_directory(self, tmp_path):
+        f = tmp_path / "a.pcap"
+        f.write_bytes(b"")
+        assert TestClient(app).get("/local/browse", params={"path": str(f)}).status_code == 400
+
+    def test_unreadable_directory_is_403(self, tmp_path, monkeypatch):
+        def deny(self):
+            raise PermissionError(self)
+
+        monkeypatch.setattr(pathlib.Path, "iterdir", deny)
+        res = TestClient(app).get("/local/browse", params={"path": str(tmp_path)})
+        assert res.status_code == 403
+
+
+class TestCaptureRoutes:
+    def test_errors_map_to_status_codes(self, monkeypatch):
+        from netsentinel.detection.lstm import ModelNotTrainedError
+
+        class Manager:
+            def __init__(self, error):
+                self.error = error
+
+            def start(self, **kwargs):
+                raise self.error
+
+            def snapshot(self):
+                return {"status": "stopped"}
+
+        client = TestClient(app)
+        monkeypatch.setattr("api.main.manager", Manager(ModelNotTrainedError("train first")))
+        res = client.post("/capture/start", json={})
+        assert (res.status_code, res.json()["detail"]) == (409, "train first")
+
+        monkeypatch.setattr("api.main.manager", Manager(RuntimeError("dumpcap missing")))
+        res = client.post("/capture/start", json={})
+        assert (res.status_code, res.json()["detail"]) == (400, "dumpcap missing")
+
+    def test_start_passes_settings_and_reports_status(self, monkeypatch):
+        calls = []
+
+        class Manager:
+            def start(self, **kwargs):
+                calls.append(kwargs)
+
+            def stop(self):
+                calls.append("stop")
+
+            def snapshot(self):
+                return {"status": "running", "iface": "en1"}
+
+        monkeypatch.setattr("api.main.manager", Manager())
+        client = TestClient(app)
+        res = client.post("/capture/start", json={"iface": "en1", "duration": 30,
+                                                  "files": 5, "save_for_training": True})
+        assert res.json()["status"] == "running"
+        assert calls == [{"iface": "en1", "duration": 30, "files": 5,
+                          "save_for_training": True}]
+        assert client.get("/capture/status").json()["iface"] == "en1"
+        client.post("/capture/stop")
+        assert calls[-1] == "stop"
+
+
 class TestJobStore:
     def test_oldest_finished_jobs_are_evicted(self, monkeypatch):
         monkeypatch.setattr(config, "API_MAX_JOBS_RETAINED", 2)

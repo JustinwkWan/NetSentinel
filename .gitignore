@@ -14,3 +14,4 @@ build/
 .claude/
 data/logs/
 data/benchmarks/
+.coverage

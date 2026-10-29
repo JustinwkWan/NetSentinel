@@ -135,3 +135,27 @@ class TestPcapParsing:
         assert (flow.src_ip, flow.dst_ip) == (client, server)
         assert [p.direction for p in flow.packets] == [1, -1, 1]
         assert flow.flow_key == "[2001:db8::10]:50000->[2606:4700::1]:443/TCP"
+
+    def test_non_ip_frames_are_skipped_and_icmp_is_other(self, tmp_path):
+        from scapy.all import ARP, ICMP, IP, Ether, wrpcap
+
+        arp = Ether() / ARP(psrc="192.168.1.1", pdst="192.168.1.2")
+        ping = Ether() / IP(src="192.168.1.2", dst="192.168.1.1") / ICMP()
+        reply = Ether() / IP(src="192.168.1.1", dst="192.168.1.2") / ICMP(type=0)
+        for i, p in enumerate((arp, ping, reply)):
+            p.time = 100.0 + i
+        pcap = tmp_path / "mixed.pcap"
+        wrpcap(str(pcap), [arp, ping, reply])
+
+        (flow,) = process_packets(PcapFileSource(str(pcap)))
+
+        assert (flow.protocol, flow.src_port, flow.dst_port) == ("OTHER", 0, 0)
+        assert flow.packet_count == 2
+        assert flow.src_ip == "192.168.1.2"  # spoke first, no ports to go on
+
+    def test_packet_that_fails_to_parse_is_dropped(self):
+        class Broken:
+            def haslayer(self, layer):
+                raise ValueError("truncated frame")
+
+        assert PcapFileSource._parse_packet(Broken()) is None

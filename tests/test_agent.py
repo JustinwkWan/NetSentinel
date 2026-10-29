@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from api.models import ThreatReportDTO
 from netsentinel.agent import graph, tools
-from netsentinel.agent.parsing import as_text_list, extract_json_object
+from netsentinel.agent.parsing import as_text_list, content_to_text, extract_json_object
 from netsentinel.agent.timing import InvestigationTiming
 from netsentinel.detection.base import FlaggedFlow
 from netsentinel.ingestion.flows import FlowRecord
@@ -224,6 +224,16 @@ class TestParseReport:
         assert report.threat_type == "unknown"
         assert report.remediation == ""
 
+    def test_answer_without_json_becomes_the_summary(self):
+        msg = AIMessage(content="I could not reach a conclusion. " * 30)
+        report = graph._parse_report({"messages": [msg]}, "flow")
+        assert (report.severity, report.threat_type) == ("medium", "unknown")
+        assert report.summary == msg.content[:500]
+
+    def test_block_list_content_is_parsed(self):
+        msg = AIMessage(content=[{"type": "text", "text": json.dumps(REPORT)}])
+        assert graph._parse_report({"messages": [msg]}, "flow").severity == "critical"
+
     @pytest.mark.parametrize("raw, expected", [
         (" HIGH ", "high"), ("severe", "medium"), (None, "medium"),
     ])
@@ -238,3 +248,80 @@ class TestAsTextList:
 
     def test_scalars_become_strings(self):
         assert as_text_list([1, "a"]) == ["1", "a"]
+
+
+class TestContentToText:
+    def test_block_list_is_joined(self):
+        assert content_to_text([{"text": "a"}, {"type": "image"}, "b"]) == "a  b"
+
+    def test_non_string_is_stringified(self):
+        assert content_to_text(42) == "42"
+
+
+class FakeStore:
+    def __init__(self, results=None, error=None):
+        self.results, self.error, self.queries = results or [], error, []
+
+    def _query(self, query):
+        self.queries.append(query)
+        if self.error:
+            raise self.error
+        return self.results
+
+    query_cve = query_attack = _query
+
+
+class TestTools:
+    """The tools return concise JSON, and never raise into the graph."""
+
+    def test_cve_lookup_returns_id_severity_and_truncated_description(self, monkeypatch):
+        store = FakeStore([{"content": "x" * 900,
+                            "metadata": {"cve_id": "CVE-2021-44228", "severity": "critical"}}])
+        monkeypatch.setattr(tools, "_store", store)
+
+        entries = json.loads(tools.cve_lookup.invoke({"query": "log4j rce"}))
+
+        assert store.queries == ["log4j rce"]
+        assert entries == [{"cve_id": "CVE-2021-44228", "description": "x" * 500,
+                            "severity": "critical"}]
+
+    def test_attack_lookup_returns_id_and_name(self, monkeypatch):
+        monkeypatch.setattr(tools, "_store", FakeStore([
+            {"content": "Adversaries may scan.",
+             "metadata": {"technique_id": "T1046", "name": "Network Service Discovery"}},
+        ]))
+
+        entries = json.loads(tools.attack_technique_lookup.invoke({"query": "scan"}))
+
+        assert entries == [{"technique_id": "T1046", "name": "Network Service Discovery",
+                            "description": "Adversaries may scan."}]
+
+    def test_missing_metadata_reads_unknown(self, monkeypatch):
+        monkeypatch.setattr(tools, "_store", FakeStore([{"content": "d"}]))
+        cve = json.loads(tools.cve_lookup.invoke({"query": "q"}))[0]
+        attack = json.loads(tools.attack_technique_lookup.invoke({"query": "q"}))[0]
+        assert (cve["cve_id"], cve["severity"]) == ("unknown", "unknown")
+        assert (attack["technique_id"], attack["name"]) == ("unknown", "unknown")
+
+    @pytest.mark.parametrize("store", [FakeStore(), FakeStore(error=RuntimeError("db gone"))])
+    def test_no_results_or_failure_is_a_message(self, monkeypatch, store):
+        monkeypatch.setattr(tools, "_store", store)
+        assert tools.cve_lookup.invoke({"query": "q"}) == (
+            "No relevant CVE entries found for this query.")
+        assert tools.attack_technique_lookup.invoke({"query": "q"}) == (
+            "No relevant ATT&CK techniques found for this query.")
+
+    def test_store_is_opened_once_and_reused(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(tools, "_store", None)
+        monkeypatch.setattr(tools, "RAGStore", lambda: opened.append(1) or FakeStore())
+        tools.cve_lookup.invoke({"query": "a"})
+        tools.attack_technique_lookup.invoke({"query": "b"})
+        assert len(opened) == 1
+
+    def test_set_store_injects_a_store(self, monkeypatch):
+        monkeypatch.setattr(tools, "_store", None)
+        store = FakeStore()
+        tools.set_store(store)
+        tools.cve_lookup.invoke({"query": "q"})
+        assert store.queries == ["q"]
